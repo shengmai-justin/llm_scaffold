@@ -28,7 +28,7 @@ if [ ! -d "$REPO_PATH" ]; then
 fi
 
 # ── Load modules ──────────────────────────────────────────────
-module load gcc/12.2.0
+module load gcc/14.2.0
 module load cuda/12.8.1
 module load conda
 
