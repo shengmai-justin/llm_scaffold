@@ -11,7 +11,7 @@
 # ── Configuration ─────────────────────────────────────────────
 MODEL="Qwen/Qwen3.5-9B"
 VLLM_PORT=8000
-MAX_EXPERIMENTS=100
+MAX_EXPERIMENTS=0
 MAX_MODEL_LEN=30000
 PROJ_DIR="/blue/buyuheng/li_an.ucsb/proj_yepeng"
 CONDA_ENV="${PROJ_DIR}/envs/myenv"

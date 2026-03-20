@@ -116,7 +116,6 @@ def run_single_iteration(agent_state):
         proposal = planner.propose_experiment(agent_state)
     except Exception as e:
         print(f"  Proposal failed: {e}")
-        agent_state["experiment_count"] += 1
         state.save_state(agent_state)
         return agent_state
 
@@ -144,7 +143,6 @@ def run_single_iteration(agent_state):
             print("  Edit failed after retry")
             commit = state.get_current_commit(repo_path)
             results.append_result(commit, None, None, "edit_failed", retry_desc)
-            agent_state["experiment_count"] += 1
             state.save_state(agent_state)
             return agent_state
 
@@ -158,7 +156,6 @@ def run_single_iteration(agent_state):
         state.write_file(train_path, original_text)
         commit = state.get_current_commit(repo_path)
         results.append_result(commit, None, None, "edit_failed", proposal["description"])
-        agent_state["experiment_count"] += 1
         state.save_state(agent_state)
         return agent_state
 
