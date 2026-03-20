@@ -45,7 +45,7 @@ echo "Started:   $(date)"
 echo "---"
 
 # ── Install deps ──────────────────────────────────────────────
-pip install openai --quiet
+pip install openai vllm --quiet
 cd "$REPO_PATH" && uv sync && cd "$SCAFFOLD_DIR"
 
 # ── Start vllm server on GPU 0 ───────────────────────────────
