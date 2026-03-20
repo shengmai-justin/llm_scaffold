@@ -82,7 +82,7 @@ def propose_experiment(agent_state, error_context=None):
                 model=agent_state["llm_model"],
                 messages=messages,
                 temperature=0.7,
-                max_tokens=1024,
+                max_tokens=12800,
             )
             text = resp.choices[0].message.content.strip()
             # Strip markdown code fences if present

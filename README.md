@@ -1,0 +1,123 @@
+# LLM Scaffold
+
+A deterministic experiment harness where an LLM proposes small `search/replace` edits to `train.py` and the harness handles everything else (git, execution, parsing, logging, keep/revert).
+
+Built on top of [karpathy/autoresearch](https://github.com/karpathy/autoresearch).
+
+## Architecture
+
+```
+main.py      — orchestration, setup, experiment loop, recovery
+state.py     — persistent state (state.json), git operations, file I/O
+planner.py   — LLM context assembly, proposal, search/replace editing
+results.py   — execution, log parsing, result logging, keep/discard decision
+prompt.md    — system prompt for the LLM (editable without touching code)
+run.sh       — Slurm sbatch script (SGLang + training on single B200)
+```
+
+## Setup
+
+### One-time setup (on cluster)
+
+```bash
+# 1. Clone the scaffold
+cd /blue/buyuheng/li_an.ucsb/proj_yepeng
+git clone git@github.com:<your-username>/llm_scaffold.git
+
+# 2. Install SGLang + openai in your conda env
+module load gcc/14.2.0 cuda/12.8.1 conda
+conda activate /blue/buyuheng/li_an.ucsb/proj_yepeng/envs/myenv
+pip install openai "sglang[all]"
+```
+
+The autoresearch repo and Qwen3.5-9B model are auto-downloaded on first run.
+
+### Run
+
+```bash
+cd /blue/buyuheng/li_an.ucsb/proj_yepeng/llm_scaffold
+sbatch run.sh
+```
+
+The script handles:
+- Cloning autoresearch repo if missing
+- Downloading Qwen3.5-9B model to blue storage
+- `uv sync` for training dependencies
+- Starting SGLang server (single B200 GPU, shared with training)
+- Running baseline + experiment loop
+- Cleanup on exit
+
+### Monitor
+
+```bash
+# Live output
+tail -f autoresearch_<job_id>.log
+
+# Experiment history
+cat results.tsv
+
+# Current best
+cat state.json
+
+# SGLang server logs
+cat sglang_server.log
+```
+
+### Resume after interrupt
+
+Add `--resume` to the `python main.py` call in `run.sh`, then:
+
+```bash
+sbatch run.sh
+```
+
+## How it works
+
+```
+Setup:
+  1. Auto-reset dirty train.py if interrupted
+  2. Create experiment branch
+  3. Run baseline training, record initial val_bpb
+
+Experiment loop:
+  1. Reset to best commit
+  2. Ask LLM for one proposal (JSON: description + search/replace edits)
+  3. Validate edits exist in train.py (retry once if not)
+  4. Apply edits, commit
+  5. Run training (uv run train.py)
+  6. Parse val_bpb + peak_vram_mb from output
+  7. Keep (val_bpb improved) or revert (git reset --hard)
+  8. Log to results.tsv, save state.json
+  9. Repeat
+```
+
+### Decision rules
+
+| Status | Condition |
+|---|---|
+| `keep` | val_bpb strictly lower, OR equal with lower peak VRAM |
+| `discard` | val_bpb equal or worse |
+| `crash` | Metrics missing or timeout |
+| `edit_failed` | Search/replace edits could not be applied |
+
+## Configuration
+
+Edit the top of `run.sh`:
+
+```bash
+MODEL="Qwen/Qwen3.5-9B"     # LLM for proposals
+MAX_EXPERIMENTS=100           # stop after N experiments
+MAX_MODEL_LEN=8192            # context length for SGLang
+```
+
+Edit `prompt.md` to change the system prompt sent to the LLM.
+
+CLI flags for `main.py`:
+
+```
+--repo-path        Path to autoresearch repo (default: ./autoresearch)
+--max-experiments  Max iterations (default: 100)
+--llm-base-url     OpenAI-compatible endpoint (default: http://localhost:8000/v1)
+--llm-model        Model name (default: Qwen/Qwen3.5-9B)
+--resume           Resume from existing state.json
+```
