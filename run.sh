@@ -35,6 +35,9 @@ module load conda
 # ── Activate conda env ────────────────────────────────────────
 conda activate "$CONDA_ENV"
 
+# ── Cache HuggingFace models on blue storage ──────────────────
+export HF_HOME="${PROJ_DIR}/.cache/huggingface"
+
 # ── Info ──────────────────────────────────────────────────────
 echo "Job ID:    $SLURM_JOB_ID"
 echo "Node:      $(hostname)"
