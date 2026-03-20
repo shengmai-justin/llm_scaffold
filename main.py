@@ -35,7 +35,7 @@ def run_setup(repo_path, max_experiments):
     print(f"Repo:   {repo_path}")
     print(f"Tag:    {run_tag}")
 
-    state.verify_clean_repo(repo_path)
+    state.ensure_clean_repo(repo_path)
 
     try:
         state.create_experiment_branch(repo_path, branch_name)

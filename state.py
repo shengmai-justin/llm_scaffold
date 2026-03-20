@@ -76,6 +76,15 @@ def verify_clean_repo(repo_path):
         raise RuntimeError(f"train.py has uncommitted changes:\n{status}")
 
 
+def ensure_clean_repo(repo_path):
+    """Reset train.py if dirty (e.g. from an interrupted run), then verify."""
+    status = _git(["status", "--porcelain", "--", "train.py"], repo_path)
+    if status:
+        print(f"  Resetting dirty train.py from interrupted run...")
+        _git(["checkout", "--", "train.py"], repo_path)
+    verify_clean_repo(repo_path)
+
+
 # ---------------------------------------------------------------------------
 # File I/O
 # ---------------------------------------------------------------------------
