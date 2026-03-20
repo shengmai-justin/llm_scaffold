@@ -15,11 +15,17 @@ MAX_EXPERIMENTS=100
 MAX_MODEL_LEN=8192
 PROJ_DIR="/blue/buyuheng/li_an.ucsb/proj_yepeng"
 CONDA_ENV="${PROJ_DIR}/envs/myenv"
-REPO_PATH="${PROJ_DIR}/autoresearch"
 SCAFFOLD_DIR="${PROJ_DIR}/llm_scaffold"
+REPO_PATH="${SCAFFOLD_DIR}/autoresearch"
 
 # ── Navigate to project dir ───────────────────────────────────
 cd "$SCAFFOLD_DIR"
+
+# ── Clone autoresearch if not present ─────────────────────────
+if [ ! -d "$REPO_PATH" ]; then
+    echo "Cloning autoresearch repo..."
+    git clone https://github.com/karpathy/autoresearch.git "$REPO_PATH"
+fi
 
 # ── Load modules ──────────────────────────────────────────────
 module load gcc/12.2.0

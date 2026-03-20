@@ -15,7 +15,7 @@ import planner
 import results
 
 SCAFFOLD_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_REPO_PATH = os.path.abspath(os.path.join(SCAFFOLD_DIR, "..", "autoresearch"))
+DEFAULT_REPO_PATH = os.path.join(SCAFFOLD_DIR, "autoresearch")
 TRAIN_TIMEOUT = 600  # seconds (5 min budget + startup/compilation overhead)
 
 
