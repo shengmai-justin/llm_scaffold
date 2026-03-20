@@ -45,7 +45,7 @@ echo "Started:   $(date)"
 echo "---"
 
 # ── Install deps ──────────────────────────────────────────────
-pip install openai vllm --quiet
+pip install openai vllm flash-attn --upgrade --quiet
 cd "$REPO_PATH" && uv sync && cd "$SCAFFOLD_DIR"
 
 # ── Start vllm server on GPU 0 ───────────────────────────────
@@ -56,6 +56,7 @@ vllm serve "$MODEL" \
     --gpu-memory-utilization 0.90 \
     --dtype bfloat16 \
     --reasoning-parser qwen3 \
+    --language-model-only \
     &> vllm_server.log &
 VLLM_PID=$!
 
