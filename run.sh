@@ -58,7 +58,7 @@ python -m sglang.launch_server \
     --model-path "$MODEL" \
     --port "$VLLM_PORT" \
     --tp-size 1 \
-    --mem-fraction-static 0.1 \
+    --mem-fraction-static 0.3 \
     --context-length "$MAX_MODEL_LEN" \
     --reasoning-parser qwen3 \
     &> sglang_server.log &
