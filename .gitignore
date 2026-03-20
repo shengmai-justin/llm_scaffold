@@ -7,3 +7,4 @@ vllm_server.log
 slurm_*.out
 autoresearch_*.log
 .claude/
+CLAUDE.md
