@@ -44,8 +44,9 @@ echo "Repo:      $REPO_PATH"
 echo "Started:   $(date)"
 echo "---"
 
-# ── Install scaffold deps ────────────────────────────────────
+# ── Install deps ──────────────────────────────────────────────
 pip install openai --quiet
+cd "$REPO_PATH" && uv sync && cd "$SCAFFOLD_DIR"
 
 # ── Start vllm server on GPU 0 ───────────────────────────────
 echo "Starting vllm server..."
