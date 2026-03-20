@@ -1,0 +1,8 @@
+[project]
+name = "llm-scaffold"
+version = "0.1.0"
+description = "Deterministic experiment harness for autonomous LLM training research"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.0.0",
+]
