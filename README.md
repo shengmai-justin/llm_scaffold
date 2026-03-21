@@ -27,12 +27,12 @@ run.sh       — Slurm sbatch script (SGLang + training on single B200)
 
 ```bash
 # 1. Clone the scaffold
-cd /blue/buyuheng/li_an.ucsb/proj_yepeng
+cd /path/to/your/project
 git clone git@github.com:<your-username>/llm_scaffold.git
 
 # 2. Install SGLang + openai in your conda env
 module load gcc/14.2.0 cuda/12.8.1 conda
-conda activate /blue/buyuheng/li_an.ucsb/proj_yepeng/envs/myenv
+conda activate /path/to/your/conda/env
 pip install openai "sglang[all]"
 ```
 
@@ -41,7 +41,7 @@ The autoresearch repo and Qwen3.5-9B model are auto-downloaded on first run.
 ### Run
 
 ```bash
-cd /blue/buyuheng/li_an.ucsb/proj_yepeng/llm_scaffold
+cd /path/to/your/project/llm_scaffold
 sbatch run.sh
 ```
 
