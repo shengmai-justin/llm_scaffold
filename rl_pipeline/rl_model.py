@@ -36,7 +36,7 @@ def load_model(
 
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         device_map=device,
         attn_implementation=attn_impl,
     )
