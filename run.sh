@@ -112,6 +112,7 @@ python main.py \
     --repo-path "$REPO_PATH" \
     --max-experiments "$MAX_EXPERIMENTS" \
     --llm-base-url "http://localhost:$VLLM_PORT/v1" \
-    --llm-model "$MODEL"
+    --llm-model "$MODEL" \
+    --resume
 
 echo "Finished. $(date)"

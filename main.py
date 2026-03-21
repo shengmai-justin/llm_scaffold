@@ -159,6 +159,16 @@ def run_single_iteration(agent_state):
         state.save_state(agent_state)
         return agent_state
 
+    # --- Skip if edits produced no change ---
+    if not diff:
+        print("  No-op edit (content unchanged), skipping")
+        state.write_file(train_path, original_text)
+        commit = state.get_current_commit(repo_path)
+        results.append_result(commit, None, None, "edit_failed", proposal["description"])
+        agent_state["experiment_count"] += 1
+        state.save_state(agent_state)
+        return agent_state
+
     # --- Commit ---
     state.commit_train_change(repo_path, f"exp: {proposal['description']}")
     commit = state.get_current_commit(repo_path)
