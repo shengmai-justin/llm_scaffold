@@ -20,7 +20,7 @@ Why not SGLang or a hybrid approach:
 - **Single model is simpler** — no adapter save/load/sync cycle. `optimizer.step()` updates the weights, next `model.generate()` uses them immediately.
 - **Generation speed is not the bottleneck** — each rollout runs `train.py` for ~5 minutes. Proposal generation (~1-2 min with HF generate) is a small fraction of total step time.
 
-The model uses **FlashAttention 4** (`attn_implementation="flash_attention_4"`) on B200 for best performance.
+The model uses `attn_implementation="sdpa"` by default. FA4 (`flash_attention_4`) is the ideal choice for B200 Blackwell but requires a transformers version with FA4 support (not yet in stable release). SDPA still dispatches to efficient CUDA kernels on B200. Switch to FA4 once transformers adds support.
 
 ### File Layout
 
@@ -29,7 +29,7 @@ Frozen pipeline (UNTOUCHED)        RL layer (new files)
 ─────────────────────────          ────────────────────
 main.py                            rl_main.py        ← entry point, RL experiment loop
 planner.py                         rl_planner.py     ← reuses planner.py prompt building, uses local model
-state.py                           rl_model.py       ← HF model + PEFT LoRA + FA4 + generation
+state.py                           rl_model.py       ← HF model + PEFT LoRA + generation
 results.py                         rl_trainer.py     ← entropic advantages, KL penalty, policy gradient
 run.sh                             rl_sampler.py     ← PUCT tree search
                                    rl_types.py       ← Rollout dataclass
@@ -68,13 +68,12 @@ class Rollout:
     description: str
 ```
 
-### `rl_model.py` — Local model with LoRA + FA4
+### `rl_model.py` — Local model with LoRA
 
-Single model instance for both generation and training. Uses FA4 on B200.
+Single model instance for both generation and training.
 
 - `load_model(model_dir, device, lora_rank, lora_alpha, attn_impl, lora_path) -> (model, tokenizer)`
-  - `attn_implementation` defaults to `"flash_attention_4"` (B200 Blackwell)
-  - Falls back to `"flash_attention_2"` or `"sdpa"` on older GPUs
+  - `attn_implementation` defaults to `"sdpa"` (switch to `"flash_attention_4"` when transformers supports it)
   - If `lora_path` given, loads existing adapter; otherwise creates fresh LoRA
 - `generate_with_logprobs(model, tokenizer, prompt, max_new_tokens, temperature) -> (text, full_ids, logprobs, prompt_len)`
   - `model.generate(output_logits=True)` returns raw logits (before temperature warper)
@@ -140,7 +139,7 @@ For step in 1..num_steps:
 
 ### `run_rl.sh` — Launch script
 
-No SGLang server. Model loads in-process with FA4.
+No SGLang server. Model loads in-process.
 
 ## Existing Files — ZERO MODIFICATIONS
 
@@ -184,6 +183,6 @@ accelerate
 ## Design Decisions Log
 
 1. **Single model vs hybrid (SGLang + local)** — Single model chosen because TTT requires the trained model to be the inference model. No sync overhead, simpler code.
-2. **FA4 over SDPA** — B200 Blackwell supports FA4 natively; 30-50% faster attention kernels.
+2. **SDPA default, FA4 future** — B200 supports FA4 but transformers stable release doesn't yet. SDPA is the safe default; switch to FA4 when available.
 3. **Local model over SGLang** — SGLang would need adapter sync after every training step. Blocks during loading. Adds complexity for marginal speed gain (generation is not the bottleneck).
 4. **No Ray** — ttt_autoresearch uses Ray for multi-GPU eval. We're single-GPU, so removed.

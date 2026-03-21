@@ -53,8 +53,10 @@ def propose_experiment_rl(
         temperature=temperature,
     )
 
-    # Parse JSON from response (same logic as planner.py)
-    clean = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+    # Strip thinking tags (Qwen3.5 outputs <think>...</think> before answer)
+    clean = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # Strip markdown code fences
+    clean = re.sub(r"^```[a-zA-Z]*\n?", "", clean)
     clean = re.sub(r"\n?```\s*$", "", clean)
     clean = clean.strip()
     proposal = json.loads(clean)
