@@ -97,15 +97,33 @@ def run_single_rollout(
 
     print(f"  >> {proposal['description']}  (risk: {proposal['risk']})")
 
-    # Apply edits
+    # Apply edits — retry once with error feedback (same as frozen pipeline)
     original_text = parent.code
     missing = planner.validate_edit_targets(train_path, proposal["edits"])
     if missing:
-        print(f"  Edit failed: search strings not found: {missing}")
-        state_mod.write_file(train_path, original_text)  # reset
-        rollout.status = "edit_failed"
-        rollout.reward = compute_reward(None, "edit_failed")
-        return rollout, None
+        error_msg = f"Search strings not found: {missing}"
+        print(f"  Edit failed: {error_msg}")
+        print("  Retrying with error feedback...")
+        try:
+            proposal2, rollout2 = propose_experiment_rl(
+                model, tokenizer, agent_state,
+                temperature=temperature,
+                max_new_tokens=max_new_tokens,
+                error_context=error_msg,
+            )
+            proposal = proposal2
+            rollout = rollout2
+            print(f"  >> {proposal['description']}  (risk: {proposal['risk']})")
+            missing = planner.validate_edit_targets(train_path, proposal["edits"])
+        except Exception:
+            missing = ["retry failed"]
+
+        if missing:
+            print("  Edit failed after retry")
+            state_mod.write_file(train_path, original_text)
+            rollout.status = "edit_failed"
+            rollout.reward = compute_reward(None, "edit_failed")
+            return rollout, None
 
     try:
         new_text = planner.apply_edits(train_path, proposal["edits"])
@@ -324,11 +342,12 @@ def main():
             else:
                 print("  Retrying...")
 
-            # Log to results.tsv (so planner history stays current)
-            commit = "rl"  # no git commits in RL mode
-            results.append_result(
-                commit, rollout.val_bpb, None, rollout.status, rollout.description
-            )
+            # Log to results.tsv — skip parse failures (like frozen pipeline does)
+            # so the model doesn't see "proposal_error" in its history
+            if rollout.full_ids.numel() > 0:
+                results.append_result(
+                    "rl", rollout.val_bpb, None, rollout.status, rollout.description
+                )
 
             # Log rollout
             with open(rollout_log_path, "a") as f:
