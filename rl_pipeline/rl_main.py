@@ -191,8 +191,8 @@ def main():
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--max-new-tokens", type=int, default=32768)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
-    parser.add_argument("--attn-impl", default="flash_attention_4",
-                        help="flash_attention_4 (B200), flash_attention_2, or sdpa")
+    parser.add_argument("--attn-impl", default="sdpa",
+                        help="sdpa (default), flash_attention_2, or flash_attention_4")
     parser.add_argument("--log-dir", default=os.path.join(PIPELINE_DIR, "rl_log"))
     parser.add_argument("--resume-step", type=int, default=None)
     args = parser.parse_args()
@@ -330,6 +330,9 @@ def main():
                     "val_bpb": rollout.val_bpb, "reward": rollout.reward,
                     "status": rollout.status, "description": rollout.description,
                 }) + "\n")
+
+        # Free CUDA cache before RL training (train.py subprocess may have fragmented memory)
+        torch.cuda.empty_cache()
 
         # RL training step — advantages computed from filtered rollouts only
         if rollouts:

@@ -23,7 +23,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-dir", default="Qwen/Qwen3.5-9B")
     parser.add_argument("--gpu-id", type=int, default=0)
-    parser.add_argument("--attn-impl", default="flash_attention_4")
+    parser.add_argument("--attn-impl", default="sdpa")
     args = parser.parse_args()
 
     device = f"cuda:{args.gpu_id}"

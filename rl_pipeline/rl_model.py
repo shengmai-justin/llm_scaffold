@@ -2,7 +2,7 @@
 
 Ported from ttt_autoresearch/model.py. Single in-process model for both
 generation and training — LoRA weights are always up-to-date after each
-optimizer step (no sync needed). Uses FA4 on Blackwell GPUs.
+optimizer step (no sync needed).
 """
 from __future__ import annotations
 
@@ -21,14 +21,14 @@ def load_model(
     lora_rank: int = 32,
     lora_alpha: int = 64,
     lora_path: str | None = None,
-    attn_impl: str = "flash_attention_4",
+    attn_impl: str = "sdpa",
 ) -> tuple:
     """Load base model + LoRA adapter. Returns (model, tokenizer).
 
     If lora_path is given, loads an existing adapter from disk.
     Otherwise creates a fresh LoRA adapter.
 
-    attn_impl: "flash_attention_4" (B200), "flash_attention_2", or "sdpa".
+    attn_impl: "sdpa" (default), "flash_attention_2", or "flash_attention_4".
     """
     tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=True)
     if tokenizer.pad_token is None:
@@ -43,7 +43,6 @@ def load_model(
 
     if lora_path is not None:
         model = PeftModel.from_pretrained(model, lora_path)
-        model.print_trainable_parameters()
     else:
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
@@ -56,7 +55,9 @@ def load_model(
             ],
         )
         model = get_peft_model(model, lora_config)
-        model.print_trainable_parameters()
+
+    model.gradient_checkpointing_enable()
+    model.print_trainable_parameters()
 
     return model, tokenizer
 
