@@ -106,9 +106,12 @@ def train_step(
     all_ratios = []
     all_kls = []
 
-    for rollout, adv in zip(rollouts, advantages):
+    for ri, (rollout, adv) in enumerate(zip(rollouts, advantages)):
         if abs(adv.item()) < 1e-8:
             continue
+
+        alloc = torch.cuda.memory_allocated() / 1024**3
+        print(f"    [GPU] train rollout {ri}: before forward  alloc={alloc:.1f}GB  tokens={rollout.full_ids.shape[0] - rollout.prompt_len}")
 
         old_lp = rollout.old_logprobs.to(model.device)
         new_lp = compute_response_logprobs(
@@ -130,10 +133,16 @@ def train_step(
             all_kls.append(kl_per_token.mean().item())
             shaped_adv = shaped_adv - kl_coef * kl_per_token
 
+        alloc = torch.cuda.memory_allocated() / 1024**3
+        print(f"    [GPU] train rollout {ri}: before backward alloc={alloc:.1f}GB")
+
         loss = -(ratio * shaped_adv).mean()
         loss.backward()
         total_loss += loss.item() * len(new_lp)
         num_tokens += len(new_lp)
+
+        alloc = torch.cuda.memory_allocated() / 1024**3
+        print(f"    [GPU] train rollout {ri}: after backward  alloc={alloc:.1f}GB")
 
     if num_tokens > 0:
         clip_grad_norm_(

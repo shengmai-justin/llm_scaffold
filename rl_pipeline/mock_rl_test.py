@@ -27,6 +27,12 @@ from rl_sampler import State, PUCTSampler
 from rl_trainer import compute_entropic_advantages, train_step
 
 
+def gpu_mem(label=""):
+    alloc = torch.cuda.memory_allocated() / 1024**3
+    reserved = torch.cuda.memory_reserved() / 1024**3
+    print(f"  [GPU] {label:30s} alloc={alloc:.1f}GB  reserved={reserved:.1f}GB")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-dir", default="Qwen/Qwen3.5-9B")
@@ -40,6 +46,7 @@ def main():
     tmp_dir = tempfile.mkdtemp()
 
     # Load model
+    gpu_mem("before model load")
     print("Loading model...")
     model, tokenizer = load_model(
         args.model_dir, device=device,
@@ -50,6 +57,7 @@ def main():
         [p for p in model.parameters() if p.requires_grad],
         lr=4e-5, betas=(0.9, 0.95),
     )
+    gpu_mem("after model load + optimizer")
 
     # Snapshot LoRA weights before training
     lora_params_before = {
@@ -72,6 +80,7 @@ def main():
                 temperature=1.0, max_new_tokens=4096,
             )
             print(f"  >> {proposal['description']}")
+            gpu_mem(f"after generate rollout {i+1}")
             # Assign mock reward (skip train.py)
             rollout.reward = mock_rewards[i % len(mock_rewards)]
             rollout.val_bpb = -rollout.reward
@@ -94,10 +103,12 @@ def main():
     # RL training step
     print("\nRunning RL training step...")
     torch.cuda.empty_cache()
+    gpu_mem("before train_step (after cache clear)")
     metrics = train_step(
         model, optimizer, rollouts, advantages,
         kl_coef=0.1, temperature=1.0, max_grad_norm=1.0,
     )
+    gpu_mem("after train_step")
     print(f"  loss={metrics['avg_loss']:.6f}")
     print(f"  tokens={metrics['num_tokens']}")
     if "kl_mean" in metrics:
