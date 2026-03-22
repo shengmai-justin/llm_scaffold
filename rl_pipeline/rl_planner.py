@@ -53,8 +53,12 @@ def propose_experiment_rl(
         temperature=temperature,
     )
 
-    # Strip thinking tags (Qwen3.5 outputs <think>...</think> before answer)
-    clean = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # Strip thinking block. The prompt includes <think>, so the response
+    # contains reasoning text then </think> followed by the JSON answer.
+    clean = text
+    if "</think>" in clean:
+        clean = clean.split("</think>", 1)[1]
+    clean = re.sub(r"<think>.*?</think>", "", clean, flags=re.DOTALL)
     # Strip markdown code fences
     clean = re.sub(r"^```[a-zA-Z]*\n?", "", clean)
     clean = re.sub(r"\n?```\s*$", "", clean)
