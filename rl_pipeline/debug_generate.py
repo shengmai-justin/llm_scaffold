@@ -44,7 +44,10 @@ def main():
     print(text)
 
     print(f"\n--- After stripping <think> ---")
-    clean = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    clean = text
+    if "</think>" in clean:
+        clean = clean.split("</think>", 1)[1]
+    clean = re.sub(r"<think>.*?</think>", "", clean, flags=re.DOTALL)
     clean = re.sub(r"^```[a-zA-Z]*\n?", "", clean)
     clean = re.sub(r"\n?```\s*$", "", clean)
     clean = clean.strip()
