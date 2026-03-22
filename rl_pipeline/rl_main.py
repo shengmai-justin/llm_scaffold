@@ -291,9 +291,13 @@ def main():
         print(f"  Parent: val_bpb={-parent.value:.6f}" if parent.value is not None else "  Parent: no value")
 
         rollouts: list[Rollout] = []
+        max_attempts = args.batch_size * 2  # retry budget to fill batch
+        attempt = 0
+        g = 0
 
-        for g in range(args.batch_size):
-            print(f"\n  Rollout {g+1}/{args.batch_size}")
+        while g < args.batch_size and attempt < max_attempts:
+            attempt += 1
+            print(f"\n  Rollout {g+1}/{args.batch_size} (attempt {attempt})")
             rollout, child = run_single_rollout(
                 model, tokenizer, agent_state, parent,
                 repo_path, train_path,
@@ -316,6 +320,9 @@ def main():
             # Only keep rollouts with generation artifacts for training
             if rollout.full_ids.numel() > 0:
                 rollouts.append(rollout)
+                g += 1  # count successful rollout
+            else:
+                print("  Retrying...")
 
             # Log to results.tsv (so planner history stays current)
             commit = "rl"  # no git commits in RL mode
@@ -326,7 +333,7 @@ def main():
             # Log rollout
             with open(rollout_log_path, "a") as f:
                 f.write(json.dumps({
-                    "step": step, "rollout": g,
+                    "step": step, "rollout": attempt,
                     "val_bpb": rollout.val_bpb, "reward": rollout.reward,
                     "status": rollout.status, "description": rollout.description,
                 }) + "\n")

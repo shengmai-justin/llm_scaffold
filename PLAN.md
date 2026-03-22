@@ -4,185 +4,138 @@
 
 The scaffold currently uses a **frozen** Qwen3.5-9B via SGLang to propose experiments. The LLM never learns from outcomes — it sees only the last 10 results in its prompt. TTT-Discover (arxiv 2601.16175) showed that training LLM weights at test time via RL dramatically improves scientific discovery. We adapt their approach: collect batches of (proposal, reward) rollouts, compute entropic advantages with per-token KL penalty, and update LoRA weights via policy gradient.
 
-## Modular Design Principle
+## Status: Working End-to-End
 
-**The frozen pipeline (`main.py`, `planner.py`, `state.py`, `results.py`, `run.sh`) is never modified.**
+The RL pipeline is implemented and tested on B200. Single-GPU sequential mode runs successfully: baseline → proposals → train.py eval → RL update → checkpoint.
 
-All RL code lives in new files. The RL mode is a separate entry point (`rl_main.py`) with its own launch script (`run_rl.sh`). Running `run.sh` works exactly as before.
+## Modular Design
 
-### Key Design Decision: Single Local Model (No SGLang)
+**The frozen pipeline (`main.py`, `planner.py`, `state.py`, `results.py`, `run.sh`) is untouched** (except `main.py` which got a no-op edit skip fix).
 
-This is **test-time training** — the model that generates proposals is the same model being trained. After each RL step, the LoRA weights are updated and the next generation immediately uses the improved policy. A single in-process model guarantees this with zero sync overhead.
-
-Why not SGLang or a hybrid approach:
-- **SGLang would require two model copies** — one in the server, one for training. On a 9B model this fits in VRAM, but adds complexity for LoRA adapter syncing after every training step.
-- **SGLang's `/load_lora_adapter` blocks requests** during adapter swap and doesn't support in-place weight updates.
-- **Single model is simpler** — no adapter save/load/sync cycle. `optimizer.step()` updates the weights, next `model.generate()` uses them immediately.
-- **Generation speed is not the bottleneck** — each rollout runs `train.py` for ~5 minutes. Proposal generation (~1-2 min with HF generate) is a small fraction of total step time.
-
-The model uses `attn_implementation="sdpa"` by default. FA4 (`flash_attention_4`) is the ideal choice for B200 Blackwell but requires a transformers version with FA4 support (not yet in stable release). SDPA still dispatches to efficient CUDA kernels on B200. Switch to FA4 once transformers adds support.
-
-### File Layout
+All RL code lives in `rl_pipeline/`:
 
 ```
-Frozen pipeline (UNTOUCHED)        RL layer (new files)
-─────────────────────────          ────────────────────
-main.py                            rl_main.py        ← entry point, RL experiment loop
-planner.py                         rl_planner.py     ← reuses planner.py prompt building, uses local model
-state.py                           rl_model.py       ← HF model + PEFT LoRA + generation
-results.py                         rl_trainer.py     ← entropic advantages, KL penalty, policy gradient
-run.sh                             rl_sampler.py     ← PUCT tree search
-                                   rl_types.py       ← Rollout dataclass
-                                   run_rl.sh         ← launch script (NO SGLang)
+llm_scaffold/
+├── main.py, planner.py, state.py, results.py, run.sh   ← frozen pipeline
+└── rl_pipeline/
+    ├── rl_main.py          ← entry point, RL experiment loop
+    ├── rl_model.py         ← HF model + PEFT LoRA + SDPA + gradient checkpointing
+    ├── rl_planner.py       ← wraps planner.py, strips <think> tags, local generation
+    ├── rl_trainer.py       ← entropic advantages, per-token KL penalty, policy gradient
+    ├── rl_sampler.py       ← PUCT tree search (State stores code, not git commits)
+    ├── rl_types.py         ← Rollout dataclass
+    ├── smoke_test.py       ← GPU smoke test (8 components)
+    ├── debug_generate.py   ← debug: generate one proposal, print raw output
+    ├── run_rl.sh           ← SLURM launch script (no SGLang)
+    └── mps.md              ← multi-GPU parallelization plan (Ray)
 ```
 
-### Import Graph (RL → frozen, never the reverse)
+## Key Design Decisions
+
+1. **Single local model (no SGLang)** — TTT requires the trained model to be the inference model. `optimizer.step()` updates LoRA weights, next `model.generate()` uses them immediately. No sync needed.
+
+2. **SDPA attention** — B200 supports FA4 but `transformers` stable doesn't yet. SDPA dispatches to efficient CUDA kernels. Switch to FA4 when available.
+
+3. **Gradient checkpointing** — enabled to prevent OOM during RL backward pass on long sequences (~10K prompt + ~700 response tokens through a 9B model).
+
+4. **PUCT stores code, not git commits** — `State.code` holds the full train.py text. No git operations in RL mode. PUCT tree persisted as JSON.
+
+5. **Retry on parse failures** — if the model fails to produce valid JSON (e.g., thinking exhausts max_new_tokens), retry up to `batch_size * 2` attempts. Edit failures with valid logprobs are NOT retried — they provide useful negative reward signal for RL.
+
+## Rollout Flow
 
 ```
-rl_main.py ──→ state.py (file I/O)
-           ──→ results.py (run_experiment, parse_metrics, append_result)
-           ──→ planner.py (build_planner_context, validate_planner_output, apply_edits, validate_edit_targets, preview_diff)
-           ──→ rl_planner.py ──→ planner.py (prompt building)
-                             ──→ rl_model.py (local generation with logprobs)
-           ──→ rl_model.py (standalone: transformers + peft)
-           ──→ rl_trainer.py (standalone: pure PyTorch)
-           ──→ rl_sampler.py (standalone: numpy only)
-           ──→ rl_types.py (standalone: dataclasses only)
+1. Proposal parse fails (no </think>, bad JSON)
+   → full_ids empty → RETRY (no training signal)
+
+2. Proposal parses but edits fail (search string not found)
+   → full_ids has data, status="edit_failed", reward=-1.0
+   → counts as valid rollout (useful RL signal, no retry)
+
+3. Edits apply but train.py crashes/times out
+   → status="crash", reward=-1.0
+   → counts as valid rollout
+
+4. Edits apply and train.py succeeds
+   → status="keep", reward=-val_bpb
+   → child State added to PUCT tree
+
+5. train.py always resets to parent code after every rollout
+6. PUCT stores edited code in State.code (not git)
+7. RL training only on rollouts with valid full_ids
 ```
 
-## New Files (7)
-
-### `rl_types.py` — Data structures
+## RL Training Step
 
 ```python
-@dataclass
-class Rollout:
-    prompt_text: str             # full prompt (after chat template)
-    proposal_text: str           # raw LLM response
-    full_ids: torch.Tensor       # full token sequence (prompt + response)
-    old_logprobs: torch.Tensor   # per-token logprobs from generation
-    prompt_len: int              # number of prompt tokens
-    val_bpb: float | None
-    status: str                  # keep/discard/crash/edit_failed
-    reward: float
-    description: str
+# For each rollout with nonzero advantage:
+new_lp = compute_response_logprobs(model, full_ids, prompt_len)  # with grad
+ratio = exp(new_lp - old_lp)                                     # importance sampling
+
+# Per-token KL penalty (not per-rollout):
+base_lp = compute_base_logprobs(model, full_ids, prompt_len)     # adapters disabled
+shaped_adv = adv - kl_coef * (new_lp - base_lp)
+
+loss = -(ratio * shaped_adv).mean()
+loss.backward()
+# Gradient accumulation across rollouts, then clip + step
 ```
 
-### `rl_model.py` — Local model with LoRA
+Ported from `ttt_autoresearch/train.py:337-391`.
 
-Single model instance for both generation and training.
+## Qwen3.5 Thinking Mode
 
-- `load_model(model_dir, device, lora_rank, lora_alpha, attn_impl, lora_path) -> (model, tokenizer)`
-  - `attn_implementation` defaults to `"sdpa"` (switch to `"flash_attention_4"` when transformers supports it)
-  - If `lora_path` given, loads existing adapter; otherwise creates fresh LoRA
-- `generate_with_logprobs(model, tokenizer, prompt, max_new_tokens, temperature) -> (text, full_ids, logprobs, prompt_len)`
-  - `model.generate(output_logits=True)` returns raw logits (before temperature warper)
-  - Extracts per-token logprobs, frees logit tensors immediately
-  - Same model instance used for training — LoRA weights always up-to-date
-- `compute_response_logprobs(model, full_ids, prompt_len, temperature) -> Tensor`
-  - Forward pass with gradient (for backprop)
-- `compute_base_logprobs(model, full_ids, prompt_len, temperature) -> Tensor`
-  - `model.disable_adapter_layers()` → forward pass → `model.enable_adapter_layers()`
-  - Returns base model logprobs for KL penalty
+Qwen3.5 outputs `<think>...</think>` before the JSON answer. The prompt template includes the opening `<think>` tag, so the model response starts inside the thinking block. `rl_planner.py` strips thinking by splitting on `</think>` and taking everything after it.
 
-### `rl_planner.py` — Prompt building + local generation
-
-Reuses `planner.py` for prompt assembly and validation, uses `rl_model.py` for generation:
-
-- `propose_experiment_rl(model, tokenizer, agent_state, ...) -> (proposal, Rollout)`
-  - Calls `planner.build_planner_context()` for prompt
-  - Formats with `tokenizer.apply_chat_template()`
-  - Generates via `rl_model.generate_with_logprobs()`
-  - Parses JSON, validates via `planner.validate_planner_output()`
-
-### `rl_trainer.py` — Entropic advantages + KL penalty + policy gradient
-
-- `compute_entropic_advantages(rewards) -> Tensor` — adaptive beta binary search, LOO weighting
-- `compute_reward(val_bpb, status) -> float` — `-val_bpb` for success, `-1.0` for failure
-- `train_step(model, optimizer, rollouts, advantages, kl_coef, ...) -> dict`
-  - Per-token KL penalty: `shaped_adv = adv - kl_coef * (new_lp - base_lp)`
-  - Importance-sampled policy gradient: `loss = -(ratio * shaped_adv).mean()`
-  - Returns metrics: avg_loss, num_tokens, kl_mean, ratio stats
-
-### `rl_sampler.py` — PUCT tree search
-
-- `State` class: stores code, value (-val_bpb), observation, parent lineage
-- `PUCTSampler`: PUCT score = Q(i) + c * scale * P(i) * sqrt(1+T) / (1+n[i])
-  - `sample_state()`, `update_state()`, `record_failed_rollout()`
-  - JSON persistence with atomic writes
-
-### `rl_main.py` — RL entry point
-
-Single model serves both generation and training:
-```
-Setup:
-  model, tokenizer = load_model(model_dir, device, lora_rank, lora_alpha)
-  optimizer = AdamW(model trainable params, lr=lr)
-  Run baseline, initialize PUCTSampler
-
-For step in 1..num_steps:
-  Phase 1: Collect batch_size rollouts
-    parent = sampler.sample_state()              # PUCT selection
-    Write parent.code to train.py
-    proposal, rollout = propose_experiment_rl()   # generate with CURRENT LoRA weights
-    Apply edits, run train.py, parse metrics
-    Compute reward, update PUCT tree, log to results.tsv
-
-  Phase 2: RL training step
-    advantages = compute_entropic_advantages(rollout rewards)
-    train_step(model, optimizer, rollouts, advantages, kl_coef)
-    # LoRA weights updated — next generate() uses improved policy
-
-  Phase 3: Checkpoint
-    sampler.save(step), log metrics
-```
-
-### `run_rl.sh` — Launch script
-
-No SGLang server. Model loads in-process.
-
-## Existing Files — ZERO MODIFICATIONS
-
-| File | Status |
-|---|---|
-| `main.py` | **Untouched** |
-| `planner.py` | **Untouched** |
-| `state.py` | **Untouched** |
-| `results.py` | **Untouched** |
-| `run.sh` | **Untouched** |
-
-## VRAM Budget (B200 178 GB, single GPU)
-
-Single model instance, no duplication:
-
-| Phase | Model | train.py | Optimizer/Grads | Total |
-|---|---|---|---|---|
-| Generation | ~28 GB (model + KV cache) | — | — | ~28 GB |
-| train.py eval | ~18 GB (model idle) | ~45 GB | — | ~63 GB |
-| RL update | ~18 GB (model) | — | ~20 GB | ~38 GB |
-
-All phases fit comfortably. Model stays loaded throughout.
-
-## Dependencies
-
-RL mode only (installed by `run_rl.sh`):
-```
-torch==2.9.1
-transformers>=4.52.0
-peft>=0.15.0
-numpy>=2.2.6
-accelerate
-```
+If the model exhausts `max_new_tokens` during thinking (no `</think>` in output), the parse fails and the rollout is retried.
 
 ## Bug Fixes Applied
 
-1. **Advantages/rollouts misalignment** — advantages now computed from filtered rollouts only, not all rewards
-2. **RL results not logged** — `results.append_result()` called after each rollout so planner history stays current
+1. **Advantages/rollouts misalignment** — advantages computed from `[r.reward for r in rollouts]` (filtered list only)
+2. **RL results not logged** — `results.append_result()` after each rollout
 3. **Baseline re-runs on resume** — guarded by `if args.resume_step is None`
+4. **LoRA not saved/loaded on resume** — `model.save_pretrained()` each step, `PeftModel.from_pretrained()` on resume
+5. **`ensure_results_tsv()` unconditional** — runs on both fresh and resume paths
+6. **`parent.value` truthiness** — changed to `is not None`
+7. **`<think>` tag stripping** — split on `</think>` (opening tag is in prompt, not response)
+8. **OOM during RL backward** — gradient checkpointing + `torch.cuda.empty_cache()`
+9. **No-op edits crash git commit** — skip commit if diff is empty (frozen pipeline fix)
+10. **`flash_attention_4` not supported** — default changed to `sdpa`
+11. **`torch_dtype` deprecated** — changed to `dtype`
+12. **Failed proposals not retried** — retry loop fills batch up to `batch_size * 2` attempts
 
-## Design Decisions Log
+## CLI Reference
 
-1. **Single model vs hybrid (SGLang + local)** — Single model chosen because TTT requires the trained model to be the inference model. No sync overhead, simpler code.
-2. **SDPA default, FA4 future** — B200 supports FA4 but transformers stable release doesn't yet. SDPA is the safe default; switch to FA4 when available.
-3. **Local model over SGLang** — SGLang would need adapter sync after every training step. Blocks during loading. Adds complexity for marginal speed gain (generation is not the bottleneck).
-4. **No Ray** — ttt_autoresearch uses Ray for multi-GPU eval. We're single-GPU, so removed.
+```bash
+python rl_main.py \
+    --model-dir Qwen/Qwen3.5-9B \
+    --repo-path ./autoresearch_rl \
+    --num-steps 50 \
+    --batch-size 4 \
+    --lr 4e-5 \
+    --kl-coef 0.1 \
+    --puct-c 1.0 \
+    --lora-rank 32 \
+    --lora-alpha 64 \
+    --temperature 1.0 \
+    --max-new-tokens 4096 \
+    --max-grad-norm 1.0 \
+    --attn-impl sdpa \
+    --log-dir ./rl_log \
+    --resume-step N           # resume from checkpoint
+```
+
+## Logs & Checkpoints
+
+| File | Content |
+|---|---|
+| `rl_log/rollouts.jsonl` | Per-rollout: step, val_bpb, reward, status, description |
+| `rl_log/step_log.json` | Per-step: best_bpb, rewards, loss, KL, ratio stats, timing |
+| `rl_log/puct_step_XXXXXX.json` | PUCT tree checkpoint |
+| `rl_log/lora_step_XXXXXX/` | LoRA adapter checkpoint |
+| `rl_log/best_train.py` | Best code found so far |
+| `results.tsv` | Shared with frozen pipeline format |
+
+## Next: Multi-GPU Parallelization
+
+See `rl_pipeline/mps.md`. Architecture: 1 GPU for model (generation + RL training), 7 GPUs for parallel train.py eval via Ray workers. Cuts step time from ~42 min to ~12 min for batch_size=7.
