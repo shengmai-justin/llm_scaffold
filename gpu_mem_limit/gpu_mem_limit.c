@@ -49,15 +49,16 @@ static size_t g_used_bytes  = 0;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 
-/* Real function pointers (resolved via __libc_dlsym to avoid recursion) */
+/* Real function pointers */
 static cuMemAlloc_v2_fn    real_cuMemAlloc_v2    = NULL;
 static cuMemFree_v2_fn     real_cuMemFree_v2     = NULL;
 static cuMemGetInfo_v2_fn  real_cuMemGetInfo_v2  = NULL;
 static cuMemAllocAsync_fn  real_cuMemAllocAsync  = NULL;
 static cuMemFreeAsync_fn   real_cuMemFreeAsync   = NULL;
 
-/* glibc internal dlsym — needed to resolve the real dlsym without recursion */
-extern void *__libc_dlsym(void *handle, const char *name);
+/* dlvsym — public glibc function to resolve versioned symbols.
+ * We use it instead of dlsym to avoid recursion into our override. */
+extern void *dlvsym(void *handle, const char *symbol, const char *version);
 
 /* Real dlsym pointer */
 typedef void *(*dlsym_fn)(void *, const char *);
@@ -86,15 +87,17 @@ static void do_init(void) {
         fprintf(stderr, "[gpu_mem_limit] limit=%s MB (%zu bytes)\n", env, g_limit_bytes);
     }
 
-    /* Resolve real dlsym via glibc internal */
-    real_dlsym = (dlsym_fn)__libc_dlsym(RTLD_NEXT, "dlsym");
+    /* Resolve real dlsym via dlvsym (public, won't recurse into our override) */
+    real_dlsym = (dlsym_fn)dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
 
-    /* Resolve real CUDA functions */
-    real_cuMemAlloc_v2   = (cuMemAlloc_v2_fn)__libc_dlsym(RTLD_NEXT, "cuMemAlloc_v2");
-    real_cuMemFree_v2    = (cuMemFree_v2_fn)__libc_dlsym(RTLD_NEXT, "cuMemFree_v2");
-    real_cuMemGetInfo_v2 = (cuMemGetInfo_v2_fn)__libc_dlsym(RTLD_NEXT, "cuMemGetInfo_v2");
-    real_cuMemAllocAsync = (cuMemAllocAsync_fn)__libc_dlsym(RTLD_NEXT, "cuMemAllocAsync");
-    real_cuMemFreeAsync  = (cuMemFreeAsync_fn)__libc_dlsym(RTLD_NEXT, "cuMemFreeAsync");
+    /* Resolve real CUDA functions via real_dlsym */
+    if (real_dlsym) {
+        real_cuMemAlloc_v2   = (cuMemAlloc_v2_fn)real_dlsym(RTLD_NEXT, "cuMemAlloc_v2");
+        real_cuMemFree_v2    = (cuMemFree_v2_fn)real_dlsym(RTLD_NEXT, "cuMemFree_v2");
+        real_cuMemGetInfo_v2 = (cuMemGetInfo_v2_fn)real_dlsym(RTLD_NEXT, "cuMemGetInfo_v2");
+        real_cuMemAllocAsync = (cuMemAllocAsync_fn)real_dlsym(RTLD_NEXT, "cuMemAllocAsync");
+        real_cuMemFreeAsync  = (cuMemFreeAsync_fn)real_dlsym(RTLD_NEXT, "cuMemFreeAsync");
+    }
 }
 
 static void init(void) {
@@ -152,7 +155,7 @@ void *dlsym(void *handle, const char *symbol) {
     /* Everything else: pass through to real dlsym */
     if (real_dlsym)
         return real_dlsym(handle, symbol);
-    return __libc_dlsym(handle, symbol);
+    return dlvsym(handle, symbol, "GLIBC_2.2.5");
 }
 
 /* --- Intercepted CUDA functions: sync --- */
