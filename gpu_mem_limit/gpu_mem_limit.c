@@ -1,12 +1,13 @@
 /*
  * gpu_mem_limit.c — LD_PRELOAD library to enforce per-process GPU memory limits.
  *
- * Intercepts CUDA driver API calls to cap each process at GPU_MEM_LIMIT_MB
- * megabytes of GPU memory. Covers both sync and async allocation paths.
+ * Intercepts CUDA runtime API calls (cudaMalloc, cudaFree, cudaMemGetInfo)
+ * to cap each process at GPU_MEM_LIMIT_MB megabytes of GPU memory.
  *
- * Key insight: CUDA runtime (libcudart) resolves driver API symbols via
- * dlsym(libcuda_handle, "cuMemAlloc_v2"), which bypasses normal LD_PRELOAD.
- * We intercept dlsym itself to redirect those lookups to our wrappers.
+ * Why runtime API, not driver API?
+ *   PyTorch calls cudaMalloc (runtime) through the PLT → LD_PRELOAD works.
+ *   libcudart resolves cuMemAlloc_v2 (driver) via internal dlsym → LD_PRELOAD
+ *   cannot intercept it without hacking dlsym itself.
  *
  * Usage:
  *   GPU_MEM_LIMIT_MB=88000 LD_PRELOAD=./libgpumemlimit.so python train.py
@@ -17,31 +18,27 @@
  */
 
 #define _GNU_SOURCE
+#include <dlfcn.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* CUDA types — avoid requiring CUDA headers to compile */
-typedef int CUresult;
-typedef unsigned long long CUdeviceptr;
-typedef void *CUstream;
+/* CUDA runtime error codes */
+typedef int cudaError_t;
+#define cudaSuccess 0
+#define cudaErrorMemoryAllocation 2
 
-/* dlsym constants — defined manually to avoid including <dlfcn.h>
- * which declares dlsym with __THROW/__nonnull attributes that
- * conflict with our override definition under -Werror */
-#define RTLD_NEXT ((void *)-1)
-
-#define CUDA_SUCCESS 0
-#define CUDA_ERROR_OUT_OF_MEMORY 2
+/* CUDA stream handle */
+typedef void *cudaStream_t;
 
 /* Real function signatures */
-typedef CUresult (*cuMemAlloc_v2_fn)(CUdeviceptr *, size_t);
-typedef CUresult (*cuMemFree_v2_fn)(CUdeviceptr);
-typedef CUresult (*cuMemGetInfo_v2_fn)(size_t *, size_t *);
-typedef CUresult (*cuMemAllocAsync_fn)(CUdeviceptr *, size_t, CUstream);
-typedef CUresult (*cuMemFreeAsync_fn)(CUdeviceptr, CUstream);
+typedef cudaError_t (*cudaMalloc_fn)(void **, size_t);
+typedef cudaError_t (*cudaFree_fn)(void *);
+typedef cudaError_t (*cudaMemGetInfo_fn)(size_t *, size_t *);
+typedef cudaError_t (*cudaMallocAsync_fn)(void **, size_t, cudaStream_t);
+typedef cudaError_t (*cudaFreeAsync_fn)(void *, cudaStream_t);
 
 /* State */
 static size_t g_limit_bytes = 0;   /* 0 = no limit */
@@ -50,35 +47,17 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 
 /* Real function pointers */
-static cuMemAlloc_v2_fn    real_cuMemAlloc_v2    = NULL;
-static cuMemFree_v2_fn     real_cuMemFree_v2     = NULL;
-static cuMemGetInfo_v2_fn  real_cuMemGetInfo_v2  = NULL;
-static cuMemAllocAsync_fn  real_cuMemAllocAsync  = NULL;
-static cuMemFreeAsync_fn   real_cuMemFreeAsync   = NULL;
-
-/* dlvsym — public glibc function to resolve versioned symbols.
- * We use it instead of dlsym to avoid recursion into our override. */
-extern void *dlvsym(void *handle, const char *symbol, const char *version);
-
-/* Real dlsym pointer */
-typedef void *(*dlsym_fn)(void *, const char *);
-static dlsym_fn real_dlsym = NULL;
+static cudaMalloc_fn      real_cudaMalloc      = NULL;
+static cudaFree_fn        real_cudaFree        = NULL;
+static cudaMemGetInfo_fn  real_cudaMemGetInfo  = NULL;
+static cudaMallocAsync_fn real_cudaMallocAsync = NULL;
+static cudaFreeAsync_fn   real_cudaFreeAsync   = NULL;
 
 /* Allocation tracker */
 #define MAX_ALLOCS 65536
-static struct { CUdeviceptr ptr; size_t size; } g_allocs[MAX_ALLOCS];
+static struct { void *ptr; size_t size; } g_allocs[MAX_ALLOCS];
 static int g_num_allocs = 0;
 static int g_dropped = 0;
-
-/* Forward declarations of our intercepted CUDA functions */
-CUresult cuMemAlloc_v2(CUdeviceptr *dptr, size_t bytesize);
-CUresult cuMemAlloc(CUdeviceptr *dptr, size_t bytesize);
-CUresult cuMemFree_v2(CUdeviceptr dptr);
-CUresult cuMemFree(CUdeviceptr dptr);
-CUresult cuMemGetInfo_v2(size_t *free_out, size_t *total_out);
-CUresult cuMemGetInfo(size_t *free_out, size_t *total_out);
-CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream stream);
-CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream stream);
 
 static void do_init(void) {
     const char *env = getenv("GPU_MEM_LIMIT_MB");
@@ -87,24 +66,18 @@ static void do_init(void) {
         fprintf(stderr, "[gpu_mem_limit] limit=%s MB (%zu bytes)\n", env, g_limit_bytes);
     }
 
-    /* Resolve real dlsym via dlvsym (public, won't recurse into our override) */
-    real_dlsym = (dlsym_fn)dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
-
-    /* Resolve real CUDA functions via real_dlsym */
-    if (real_dlsym) {
-        real_cuMemAlloc_v2   = (cuMemAlloc_v2_fn)real_dlsym(RTLD_NEXT, "cuMemAlloc_v2");
-        real_cuMemFree_v2    = (cuMemFree_v2_fn)real_dlsym(RTLD_NEXT, "cuMemFree_v2");
-        real_cuMemGetInfo_v2 = (cuMemGetInfo_v2_fn)real_dlsym(RTLD_NEXT, "cuMemGetInfo_v2");
-        real_cuMemAllocAsync = (cuMemAllocAsync_fn)real_dlsym(RTLD_NEXT, "cuMemAllocAsync");
-        real_cuMemFreeAsync  = (cuMemFreeAsync_fn)real_dlsym(RTLD_NEXT, "cuMemFreeAsync");
-    }
+    real_cudaMalloc      = (cudaMalloc_fn)dlsym(RTLD_NEXT, "cudaMalloc");
+    real_cudaFree        = (cudaFree_fn)dlsym(RTLD_NEXT, "cudaFree");
+    real_cudaMemGetInfo  = (cudaMemGetInfo_fn)dlsym(RTLD_NEXT, "cudaMemGetInfo");
+    real_cudaMallocAsync = (cudaMallocAsync_fn)dlsym(RTLD_NEXT, "cudaMallocAsync");
+    real_cudaFreeAsync   = (cudaFreeAsync_fn)dlsym(RTLD_NEXT, "cudaFreeAsync");
 }
 
 static void init(void) {
     pthread_once(&g_once, do_init);
 }
 
-static void track_alloc(CUdeviceptr ptr, size_t size) {
+static void track_alloc(void *ptr, size_t size) {
     if (g_num_allocs < MAX_ALLOCS) {
         g_allocs[g_num_allocs].ptr  = ptr;
         g_allocs[g_num_allocs].size = size;
@@ -117,7 +90,7 @@ static void track_alloc(CUdeviceptr ptr, size_t size) {
     }
 }
 
-static size_t untrack_alloc(CUdeviceptr ptr) {
+static size_t untrack_alloc(void *ptr) {
     for (int i = 0; i < g_num_allocs; i++) {
         if (g_allocs[i].ptr == ptr) {
             size_t size = g_allocs[i].size;
@@ -129,71 +102,38 @@ static size_t untrack_alloc(CUdeviceptr ptr) {
     return 0;
 }
 
-/* --- dlsym interceptor ---
- *
- * CUDA runtime (libcudart.so) resolves driver API symbols via:
- *   handle = dlopen("libcuda.so", ...);
- *   fn = dlsym(handle, "cuMemAlloc_v2");
- *
- * This bypasses LD_PRELOAD because dlsym(handle, ...) searches only that
- * library. We intercept dlsym itself to redirect CUDA symbol lookups
- * to our wrapper functions.
- */
-void *dlsym(void *handle, const char *symbol) {
+/* --- Intercepted CUDA runtime functions --- */
+
+cudaError_t cudaMalloc(void **devPtr, size_t size) {
     init();
-
-    /* Redirect CUDA driver API lookups to our wrappers */
-    if (strcmp(symbol, "cuMemAlloc_v2") == 0)    return (void *)cuMemAlloc_v2;
-    if (strcmp(symbol, "cuMemAlloc") == 0)        return (void *)cuMemAlloc;
-    if (strcmp(symbol, "cuMemFree_v2") == 0)      return (void *)cuMemFree_v2;
-    if (strcmp(symbol, "cuMemFree") == 0)          return (void *)cuMemFree;
-    if (strcmp(symbol, "cuMemGetInfo_v2") == 0)    return (void *)cuMemGetInfo_v2;
-    if (strcmp(symbol, "cuMemGetInfo") == 0)        return (void *)cuMemGetInfo;
-    if (strcmp(symbol, "cuMemAllocAsync") == 0)    return (void *)cuMemAllocAsync;
-    if (strcmp(symbol, "cuMemFreeAsync") == 0)      return (void *)cuMemFreeAsync;
-
-    /* Everything else: pass through to real dlsym */
-    if (real_dlsym)
-        return real_dlsym(handle, symbol);
-    return dlvsym(handle, symbol, "GLIBC_2.2.5");
-}
-
-/* --- Intercepted CUDA functions: sync --- */
-
-CUresult cuMemAlloc_v2(CUdeviceptr *dptr, size_t bytesize) {
-    init();
-    if (!real_cuMemAlloc_v2) return CUDA_ERROR_OUT_OF_MEMORY;
+    if (!real_cudaMalloc) return cudaErrorMemoryAllocation;
 
     pthread_mutex_lock(&g_lock);
 
-    if (g_limit_bytes > 0 && g_used_bytes + bytesize > g_limit_bytes) {
+    if (g_limit_bytes > 0 && g_used_bytes + size > g_limit_bytes) {
         pthread_mutex_unlock(&g_lock);
-        return CUDA_ERROR_OUT_OF_MEMORY;
+        return cudaErrorMemoryAllocation;
     }
 
-    CUresult res = real_cuMemAlloc_v2(dptr, bytesize);
-    if (res == CUDA_SUCCESS) {
-        g_used_bytes += bytesize;
-        track_alloc(*dptr, bytesize);
+    cudaError_t res = real_cudaMalloc(devPtr, size);
+    if (res == cudaSuccess) {
+        g_used_bytes += size;
+        track_alloc(*devPtr, size);
     }
 
     pthread_mutex_unlock(&g_lock);
     return res;
 }
 
-CUresult cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
-    return cuMemAlloc_v2(dptr, bytesize);
-}
-
-CUresult cuMemFree_v2(CUdeviceptr dptr) {
+cudaError_t cudaFree(void *devPtr) {
     init();
-    if (!real_cuMemFree_v2) return CUDA_SUCCESS;
+    if (!real_cudaFree) return cudaSuccess;
 
-    CUresult res = real_cuMemFree_v2(dptr);
+    cudaError_t res = real_cudaFree(devPtr);
 
     pthread_mutex_lock(&g_lock);
-    if (res == CUDA_SUCCESS) {
-        size_t freed = untrack_alloc(dptr);
+    if (res == cudaSuccess) {
+        size_t freed = untrack_alloc(devPtr);
         if (freed > g_used_bytes)
             g_used_bytes = 0;
         else
@@ -204,18 +144,14 @@ CUresult cuMemFree_v2(CUdeviceptr dptr) {
     return res;
 }
 
-CUresult cuMemFree(CUdeviceptr dptr) {
-    return cuMemFree_v2(dptr);
-}
-
-CUresult cuMemGetInfo_v2(size_t *free_out, size_t *total_out) {
+cudaError_t cudaMemGetInfo(size_t *free_out, size_t *total_out) {
     init();
-    if (!real_cuMemGetInfo_v2) return 1;
+    if (!real_cudaMemGetInfo) return 1;
 
-    CUresult res = real_cuMemGetInfo_v2(free_out, total_out);
+    cudaError_t res = real_cudaMemGetInfo(free_out, total_out);
 
     pthread_mutex_lock(&g_lock);
-    if (res == CUDA_SUCCESS && g_limit_bytes > 0) {
+    if (res == cudaSuccess && g_limit_bytes > 0) {
         *total_out = g_limit_bytes;
         *free_out  = (g_used_bytes < g_limit_bytes)
                    ? g_limit_bytes - g_used_bytes
@@ -226,42 +162,38 @@ CUresult cuMemGetInfo_v2(size_t *free_out, size_t *total_out) {
     return res;
 }
 
-CUresult cuMemGetInfo(size_t *free_out, size_t *total_out) {
-    return cuMemGetInfo_v2(free_out, total_out);
-}
+/* --- Async variants --- */
 
-/* --- Intercepted CUDA functions: async --- */
-
-CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream stream) {
+cudaError_t cudaMallocAsync(void **devPtr, size_t size, cudaStream_t stream) {
     init();
-    if (!real_cuMemAllocAsync) return CUDA_ERROR_OUT_OF_MEMORY;
+    if (!real_cudaMallocAsync) return cudaErrorMemoryAllocation;
 
     pthread_mutex_lock(&g_lock);
 
-    if (g_limit_bytes > 0 && g_used_bytes + bytesize > g_limit_bytes) {
+    if (g_limit_bytes > 0 && g_used_bytes + size > g_limit_bytes) {
         pthread_mutex_unlock(&g_lock);
-        return CUDA_ERROR_OUT_OF_MEMORY;
+        return cudaErrorMemoryAllocation;
     }
 
-    CUresult res = real_cuMemAllocAsync(dptr, bytesize, stream);
-    if (res == CUDA_SUCCESS) {
-        g_used_bytes += bytesize;
-        track_alloc(*dptr, bytesize);
+    cudaError_t res = real_cudaMallocAsync(devPtr, size, stream);
+    if (res == cudaSuccess) {
+        g_used_bytes += size;
+        track_alloc(*devPtr, size);
     }
 
     pthread_mutex_unlock(&g_lock);
     return res;
 }
 
-CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream stream) {
+cudaError_t cudaFreeAsync(void *devPtr, cudaStream_t stream) {
     init();
-    if (!real_cuMemFreeAsync) return CUDA_SUCCESS;
+    if (!real_cudaFreeAsync) return cudaSuccess;
 
-    CUresult res = real_cuMemFreeAsync(dptr, stream);
+    cudaError_t res = real_cudaFreeAsync(devPtr, stream);
 
     pthread_mutex_lock(&g_lock);
-    if (res == CUDA_SUCCESS) {
-        size_t freed = untrack_alloc(dptr);
+    if (res == cudaSuccess) {
+        size_t freed = untrack_alloc(devPtr);
         if (freed > g_used_bytes)
             g_used_bytes = 0;
         else
