@@ -6,12 +6,15 @@
 #SBATCH --mem=64gb
 #SBATCH --time=10-12:00:00
 #SBATCH --partition=hpg-b200
-#SBATCH --gpus=1
+#SBATCH --gpus=8
 
 # ── Configuration ─────────────────────────────────────────────
 MODEL="Qwen/Qwen3.5-9B"
 NUM_STEPS=50
-BATCH_SIZE=4
+MODEL_GPU=0
+EVAL_GPUS="1,2,3,4,5,6,7"
+BATCH_SIZE=14
+WORKERS_PER_GPU=2
 KL_COEF=0.1
 PUCT_C=1.0
 LR=4e-5
@@ -53,7 +56,7 @@ echo "Started:   $(date)"
 echo "---"
 
 # ── Install deps (no --upgrade to avoid replacing CUDA-specific torch) ──
-pip install "peft>=0.15.0" "transformers>=4.52.0" "accelerate" --quiet
+pip install "peft>=0.15.0" "transformers>=4.52.0" "accelerate" "ray[default]>=2.44.0" --quiet
 cd "$SOURCE_REPO" && uv sync && cd "${SCAFFOLD_DIR}/rl_pipeline"
 
 # ── Run RL experiment loop (no server needed) ─────────────────
@@ -62,6 +65,9 @@ python rl_main.py \
     --repo-path "$RL_REPO" \
     --source-repo "$SOURCE_REPO" \
     --model-dir "$MODEL" \
+    --model-gpu "$MODEL_GPU" \
+    --eval-gpus "$EVAL_GPUS" \
+    --workers-per-gpu "$WORKERS_PER_GPU" \
     --num-steps "$NUM_STEPS" \
     --batch-size "$BATCH_SIZE" \
     --kl-coef "$KL_COEF" \
@@ -69,6 +75,9 @@ python rl_main.py \
     --lr "$LR" \
     --lora-rank "$LORA_RANK" \
     --lora-alpha "$LORA_ALPHA" \
+    --temperature 0.7 \
+    --max-new-tokens 4096 \
+    --attn-impl sdpa \
     --log-dir ./rl_log
 
 echo "Finished. $(date)"

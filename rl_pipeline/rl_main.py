@@ -32,6 +32,92 @@ TRAIN_TIMEOUT = 600
 
 
 # ---------------------------------------------------------------------------
+# Generate + apply (phase 1 for parallel mode)
+# ---------------------------------------------------------------------------
+
+def generate_and_apply(
+    model,
+    tokenizer,
+    agent_state: dict,
+    parent: State,
+    train_path: str,
+    temperature: float,
+    max_new_tokens: int,
+) -> tuple[Rollout, str | None, dict | None]:
+    """Generate proposal, validate/apply edits. Returns (rollout, edited_code, proposal).
+
+    Does NOT run train.py. Returns edited_code=None if edits failed.
+    """
+    # Write parent code so planner can read it
+    state_mod.write_file(train_path, parent.code)
+
+    # Propose
+    print("  Proposing...")
+    try:
+        proposal, rollout = propose_experiment_rl(
+            model, tokenizer, agent_state,
+            temperature=temperature,
+            max_new_tokens=max_new_tokens,
+        )
+    except Exception as e:
+        print(f"  Proposal failed: {e}")
+        rollout = Rollout(
+            prompt_text="", proposal_text="", full_ids=torch.tensor([]),
+            old_logprobs=torch.tensor([]), prompt_len=0,
+            val_bpb=None, status="edit_failed", reward=-1.0,
+            description=f"proposal_error: {e}",
+        )
+        return rollout, None, None
+
+    print(f"  >> {proposal['description']}  (risk: {proposal['risk']})")
+
+    # Apply edits — retry once with error feedback
+    original_text = parent.code
+    missing = planner.validate_edit_targets(train_path, proposal["edits"])
+    if missing:
+        error_msg = f"Search strings not found: {missing}"
+        print(f"  Edit failed: {error_msg}")
+        print("  Retrying with error feedback...")
+        try:
+            proposal2, rollout2 = propose_experiment_rl(
+                model, tokenizer, agent_state,
+                temperature=temperature,
+                max_new_tokens=max_new_tokens,
+                error_context=error_msg,
+            )
+            proposal = proposal2
+            rollout = rollout2
+            print(f"  >> {proposal['description']}  (risk: {proposal['risk']})")
+            missing = planner.validate_edit_targets(train_path, proposal["edits"])
+        except Exception:
+            missing = ["retry failed"]
+
+        if missing:
+            print("  Edit failed after retry")
+            state_mod.write_file(train_path, original_text)
+            rollout.status = "edit_failed"
+            rollout.reward = compute_reward(None, "edit_failed")
+            return rollout, None, proposal
+
+    try:
+        new_text = planner.apply_edits(train_path, proposal["edits"])
+        diff = planner.preview_diff(original_text, new_text)
+        if diff:
+            print(diff)
+    except ValueError as e:
+        print(f"  Apply failed: {e}")
+        state_mod.write_file(train_path, original_text)
+        rollout.status = "edit_failed"
+        rollout.reward = compute_reward(None, "edit_failed")
+        return rollout, None, proposal
+
+    edited_code = state_mod.read_file(train_path)
+    # Reset train.py back to parent
+    state_mod.write_file(train_path, original_text)
+    return rollout, edited_code, proposal
+
+
+# ---------------------------------------------------------------------------
 # Baseline
 # ---------------------------------------------------------------------------
 
@@ -199,6 +285,14 @@ def main():
                         help="Source repo to clone from if repo-path doesn't exist")
     parser.add_argument("--model-dir", default="Qwen/Qwen3.5-9B")
     parser.add_argument("--gpu-id", type=int, default=0)
+    parser.add_argument("--model-gpu", type=int, default=None,
+                        help="GPU for model (overrides --gpu-id)")
+    parser.add_argument("--eval-gpus", type=str, default="",
+                        help="Comma-separated GPU IDs for eval workers (empty = sequential)")
+    parser.add_argument("--workers-per-gpu", type=int, default=1,
+                        help="Number of eval workers per GPU (B200: 2 fits in 180GB)")
+    parser.add_argument("--no-overlap", action="store_true",
+                        help="Wait for each eval before generating next")
     parser.add_argument("--num-steps", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=4e-5)
@@ -219,6 +313,10 @@ def main():
     train_path = os.path.join(repo_path, "train.py")
     os.makedirs(args.log_dir, exist_ok=True)
 
+    # Resolve model GPU (--model-gpu overrides --gpu-id)
+    model_gpu = args.model_gpu if args.model_gpu is not None else args.gpu_id
+    parallel_mode = bool(args.eval_gpus)
+
     # Clone repo if needed
     if not os.path.exists(repo_path):
         source = os.path.abspath(args.source_repo)
@@ -232,8 +330,28 @@ def main():
         print(f"ERROR: train.py not found at {train_path}")
         sys.exit(1)
 
+    # Init Ray workers (parallel mode)
+    workers = None
+    if parallel_mode:
+        import ray
+        from rl_eval import EvalWorker
+        ray.init(ignore_reinit_error=True)
+        eval_gpu_ids = [int(g) for g in args.eval_gpus.split(",")]
+        if len(eval_gpu_ids) != len(set(eval_gpu_ids)):
+            print("ERROR: Duplicate GPU IDs in --eval-gpus")
+            sys.exit(1)
+        if model_gpu in eval_gpu_ids:
+            print(f"WARNING: model GPU {model_gpu} also in eval GPUs, will contend for memory")
+        expanded_gpu_ids = [g for g in eval_gpu_ids for _ in range(args.workers_per_gpu)]
+        workers = [
+            EvalWorker.remote(gpu, repo_path, i)
+            for i, gpu in enumerate(expanded_gpu_ids)
+        ]
+        print(f"Parallel mode: model on GPU {model_gpu}, "
+              f"eval on GPUs {eval_gpu_ids} x{args.workers_per_gpu} = {len(workers)} workers")
+
     # Load model
-    device = f"cuda:{args.gpu_id}"
+    device = f"cuda:{model_gpu}"
     print(f"Loading model {args.model_dir} on {device}...")
     model, tokenizer = load_model(
         args.model_dir, device=device,
@@ -309,53 +427,146 @@ def main():
         print(f"  Parent: val_bpb={-parent.value:.6f}" if parent.value is not None else "  Parent: no value")
 
         rollouts: list[Rollout] = []
-        max_attempts = args.batch_size * 2  # retry budget to fill batch
-        attempt = 0
-        g = 0
 
-        while g < args.batch_size and attempt < max_attempts:
-            attempt += 1
-            print(f"\n  Rollout {g+1}/{args.batch_size} (attempt {attempt})")
-            rollout, child = run_single_rollout(
-                model, tokenizer, agent_state, parent,
-                repo_path, train_path,
-                temperature=args.temperature,
-                max_new_tokens=args.max_new_tokens,
-                step=step,
-            )
+        if parallel_mode:
+            # ── Parallel mode: generate all proposals, dispatch to Ray workers ──
+            import ray
 
-            # Update PUCT tree
-            if child is not None:
-                sampler.update_state(child, parent)
-                if rollout.val_bpb is not None and rollout.val_bpb < best_bpb:
-                    best_bpb = rollout.val_bpb
-                    agent_state["best_val_bpb"] = best_bpb
-                    print(f"  *** NEW BEST: {best_bpb:.6f} ***")
-                    Path(os.path.join(args.log_dir, "best_train.py")).write_text(child.code)
-            else:
-                sampler.record_failed_rollout(parent)
+            pending = []  # (ray_ref, rollout, edited_code, attempt_num)
+            max_attempts = args.batch_size * 2
+            attempt = 0
+            g = 0
 
-            # Only keep rollouts with generation artifacts for training
-            if rollout.full_ids.numel() > 0:
+            while g < args.batch_size and attempt < max_attempts:
+                attempt += 1
+                print(f"\n  Rollout {g+1}/{args.batch_size} (attempt {attempt})")
+
+                rollout, edited_code, proposal = generate_and_apply(
+                    model, tokenizer, agent_state, parent,
+                    train_path,
+                    temperature=args.temperature,
+                    max_new_tokens=args.max_new_tokens,
+                )
+
+                if rollout.full_ids.numel() == 0:
+                    # Parse failure — log and retry
+                    with open(rollout_log_path, "a") as f:
+                        f.write(json.dumps({
+                            "step": step, "rollout": attempt,
+                            "val_bpb": None, "reward": rollout.reward,
+                            "status": rollout.status, "description": rollout.description,
+                        }) + "\n")
+                    print("  Retrying...")
+                    continue
+
+                if edited_code is not None:
+                    # Dispatch to Ray worker
+                    worker = workers[g % len(workers)]
+                    ref = worker.evaluate.remote(parent.code, edited_code, step)
+                    pending.append((ref, rollout, edited_code, attempt))
+                    if args.no_overlap:
+                        ray.get(ref)  # wait before generating next
+                else:
+                    # Edit failed — has logprobs, counts as rollout for RL
+                    rollouts.append(rollout)
+                    sampler.record_failed_rollout(parent)
+                    results.append_result(
+                        "rl", rollout.val_bpb, None, rollout.status, rollout.description
+                    )
+                    with open(rollout_log_path, "a") as f:
+                        f.write(json.dumps({
+                            "step": step, "rollout": attempt,
+                            "val_bpb": rollout.val_bpb, "reward": rollout.reward,
+                            "status": rollout.status, "description": rollout.description,
+                        }) + "\n")
+
+                g += 1
+
+            # Collect eval results from Ray workers
+            for ref, rollout, edited_code, attempt_num in pending:
+                result = ray.get(ref)
+                rollout.val_bpb = result["val_bpb"]
+                rollout.status = "keep" if result["success"] else "crash"
+                rollout.reward = compute_reward(rollout.val_bpb, rollout.status)
+
+                val_str = f"{rollout.val_bpb:.6f}" if rollout.val_bpb is not None else "—"
+                print(f"  Eval result: val_bpb={val_str}  reward={rollout.reward:.4f}")
+
+                # Update PUCT tree
+                if result["success"]:
+                    child = State(
+                        timestep=step,
+                        code=edited_code,
+                        value=-result["val_bpb"],
+                        observation=result["output"],
+                    )
+                    sampler.update_state(child, parent)
+                    if rollout.val_bpb < best_bpb:
+                        best_bpb = rollout.val_bpb
+                        agent_state["best_val_bpb"] = best_bpb
+                        print(f"  *** NEW BEST: {best_bpb:.6f} ***")
+                        Path(os.path.join(args.log_dir, "best_train.py")).write_text(edited_code)
+                else:
+                    sampler.record_failed_rollout(parent)
+
                 rollouts.append(rollout)
-                g += 1  # count successful rollout
-            else:
-                print("  Retrying...")
 
-            # Log to results.tsv — skip parse failures (like frozen pipeline does)
-            # so the model doesn't see "proposal_error" in its history
-            if rollout.full_ids.numel() > 0:
                 results.append_result(
                     "rl", rollout.val_bpb, None, rollout.status, rollout.description
                 )
+                with open(rollout_log_path, "a") as f:
+                    f.write(json.dumps({
+                        "step": step, "rollout": attempt_num,
+                        "val_bpb": rollout.val_bpb, "reward": rollout.reward,
+                        "status": rollout.status, "description": rollout.description,
+                    }) + "\n")
 
-            # Log rollout
-            with open(rollout_log_path, "a") as f:
-                f.write(json.dumps({
-                    "step": step, "rollout": attempt,
-                    "val_bpb": rollout.val_bpb, "reward": rollout.reward,
-                    "status": rollout.status, "description": rollout.description,
-                }) + "\n")
+        else:
+            # ── Sequential mode: same as before ──
+            max_attempts = args.batch_size * 2
+            attempt = 0
+            g = 0
+
+            while g < args.batch_size and attempt < max_attempts:
+                attempt += 1
+                print(f"\n  Rollout {g+1}/{args.batch_size} (attempt {attempt})")
+                rollout, child = run_single_rollout(
+                    model, tokenizer, agent_state, parent,
+                    repo_path, train_path,
+                    temperature=args.temperature,
+                    max_new_tokens=args.max_new_tokens,
+                    step=step,
+                )
+
+                # Update PUCT tree
+                if child is not None:
+                    sampler.update_state(child, parent)
+                    if rollout.val_bpb is not None and rollout.val_bpb < best_bpb:
+                        best_bpb = rollout.val_bpb
+                        agent_state["best_val_bpb"] = best_bpb
+                        print(f"  *** NEW BEST: {best_bpb:.6f} ***")
+                        Path(os.path.join(args.log_dir, "best_train.py")).write_text(child.code)
+                else:
+                    sampler.record_failed_rollout(parent)
+
+                # Only keep rollouts with generation artifacts for training
+                if rollout.full_ids.numel() > 0:
+                    rollouts.append(rollout)
+                    g += 1
+                else:
+                    print("  Retrying...")
+
+                if rollout.full_ids.numel() > 0:
+                    results.append_result(
+                        "rl", rollout.val_bpb, None, rollout.status, rollout.description
+                    )
+
+                with open(rollout_log_path, "a") as f:
+                    f.write(json.dumps({
+                        "step": step, "rollout": attempt,
+                        "val_bpb": rollout.val_bpb, "reward": rollout.reward,
+                        "status": rollout.status, "description": rollout.description,
+                    }) + "\n")
 
         # Free CUDA cache before RL training (train.py subprocess may have fragmented memory)
         torch.cuda.empty_cache()
