@@ -27,7 +27,7 @@ echo "OK"
 # Verify .so exports the right symbols
 echo ""
 echo "=== Symbol check ==="
-nm -D libgpumemlimit.so | grep -E 'cuMem(Alloc|Free|GetInfo)' || { echo "FAIL: missing symbols"; exit 1; }
+nm -D libgpumemlimit.so | grep -E 'cuda(Malloc|Free|MemGetInfo)' || { echo "FAIL: missing symbols"; exit 1; }
 echo "OK"
 
 # ── Test 1: Memory reporting is faked ────────────────────────

@@ -3,7 +3,7 @@
 #SBATCH --output=autoresearch_rl_%j.log
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=64gb
+#SBATCH --mem=100gb
 #SBATCH --time=10-12:00:00
 #SBATCH --partition=hpg-b200
 #SBATCH --gpus=8
@@ -13,8 +13,8 @@ MODEL="Qwen/Qwen3.5-9B"
 NUM_STEPS=50
 MODEL_GPU=0
 EVAL_GPUS="1,2,3,4,5,6,7"
-BATCH_SIZE=14
-WORKERS_PER_GPU=2
+BATCH_SIZE=7
+WORKERS_PER_GPU=1
 KL_COEF=0.1
 PUCT_C=1.0
 LR=4e-5
@@ -55,8 +55,7 @@ echo "Mode:      RL (local model, no SGLang)"
 echo "Started:   $(date)"
 echo "---"
 
-# ── Install deps (no --upgrade to avoid replacing CUDA-specific torch) ──
-pip install "peft>=0.15.0" "transformers>=4.52.0" "accelerate" "ray[default]>=2.44.0" --quiet
+# ── Sync autoresearch deps ────────────────────────────────────
 cd "$SOURCE_REPO" && uv sync && cd "${SCAFFOLD_DIR}/rl_pipeline"
 
 # ── Run RL experiment loop (no server needed) ─────────────────
@@ -76,7 +75,7 @@ python rl_main.py \
     --lora-rank "$LORA_RANK" \
     --lora-alpha "$LORA_ALPHA" \
     --temperature 0.7 \
-    --max-new-tokens 4096 \
+    --max-new-tokens 8192 \
     --attn-impl sdpa \
     --log-dir ./rl_log
 
