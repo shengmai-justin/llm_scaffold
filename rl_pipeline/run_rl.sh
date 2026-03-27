@@ -22,7 +22,7 @@ LORA_RANK=32
 LORA_ALPHA=64
 PROJ_DIR="/blue/buyuheng/li_an.ucsb/proj_yepeng"
 CONDA_ENV="${PROJ_DIR}/envs/myenv"
-SCAFFOLD_DIR="${PROJ_DIR}/llm_scaffold"
+SCAFFOLD_DIR="${PROJ_DIR}/llm_scaffold_rl/llm_scaffold"
 SOURCE_REPO="${SCAFFOLD_DIR}/autoresearch"
 RL_REPO="${SCAFFOLD_DIR}/autoresearch_rl"
 
