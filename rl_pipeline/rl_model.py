@@ -76,6 +76,12 @@ def generate_with_logprobs(
 ) -> tuple[str, torch.Tensor, torch.Tensor, int]:
     """Generate a response and collect per-token logprobs.
 
+    Logprobs are recomputed via compute_response_logprobs (KV-cache split)
+    rather than extracted from generate() logits. This ensures old_logprobs
+    use the same code path as new_logprobs during training, so the importance
+    sampling ratio is exactly 1.0 for on-policy updates (no bfloat16
+    divergence between autoregressive and parallel forward passes).
+
     Returns:
         (text, token_ids, logprobs, prompt_len)
         - text: decoded response string
@@ -92,25 +98,18 @@ def generate_with_logprobs(
         temperature=temperature,
         do_sample=True,
         return_dict_in_generate=True,
-        output_logits=True,
     )
 
-    full_ids = outputs.sequences[0]  # [prompt_len + new_tokens]
-    new_ids = full_ids[prompt_len:]
-
-    # Extract per-token logprobs from logits, free GPU memory immediately
-    logprobs_list = []
-    for t, logits_t in enumerate(outputs.logits):
-        if temperature > 0:
-            log_probs = torch.log_softmax(logits_t[0] / temperature, dim=-1)
-        else:
-            log_probs = torch.log_softmax(logits_t[0], dim=-1)
-        logprobs_list.append(log_probs[new_ids[t]].item())
+    full_ids = outputs.sequences[0].cpu()  # [prompt_len + new_tokens]
     del outputs
 
-    logprobs = torch.tensor(logprobs_list, dtype=torch.float32)
-    full_ids = full_ids.cpu()
+    new_ids = full_ids[prompt_len:]
     text = tokenizer.decode(new_ids, skip_special_tokens=True)
+
+    # Recompute logprobs via the same KV-cache split used in training
+    logprobs = compute_response_logprobs(
+        model, full_ids, prompt_len, temperature=temperature
+    ).detach().cpu()
 
     return text, full_ids, logprobs, prompt_len
 

@@ -493,6 +493,7 @@ def main():
                 print(f"  Eval result: val_bpb={val_str}  reward={rollout.reward:.4f}")
 
                 # Update PUCT tree
+                prev_best = best_bpb
                 if result["success"]:
                     child = State(
                         timestep=step,
@@ -501,7 +502,7 @@ def main():
                         observation=result["output"],
                     )
                     sampler.update_state(child, parent)
-                    if rollout.val_bpb < best_bpb:
+                    if rollout.val_bpb is not None and rollout.val_bpb < best_bpb:
                         best_bpb = rollout.val_bpb
                         agent_state["best_val_bpb"] = best_bpb
                         print(f"  *** NEW BEST: {best_bpb:.6f} ***")
@@ -511,14 +512,18 @@ def main():
 
                 rollouts.append(rollout)
 
+                # Log status: keep only if it beat pre-update best_bpb
+                log_status = rollout.status
+                if log_status == "keep" and (rollout.val_bpb is None or rollout.val_bpb >= prev_best):
+                    log_status = "discard"
                 results.append_result(
-                    "rl", rollout.val_bpb, None, rollout.status, rollout.description
+                    "rl", rollout.val_bpb, None, log_status, rollout.description
                 )
                 with open(rollout_log_path, "a") as f:
                     f.write(json.dumps({
                         "step": step, "rollout": attempt_num,
                         "val_bpb": rollout.val_bpb, "reward": rollout.reward,
-                        "status": rollout.status, "description": rollout.description,
+                        "status": log_status, "description": rollout.description,
                     }) + "\n")
 
         else:
@@ -539,6 +544,7 @@ def main():
                 )
 
                 # Update PUCT tree
+                prev_best = best_bpb
                 if child is not None:
                     sampler.update_state(child, parent)
                     if rollout.val_bpb is not None and rollout.val_bpb < best_bpb:
@@ -556,16 +562,20 @@ def main():
                 else:
                     print("  Retrying...")
 
+                # Log status: keep only if it beat pre-update best_bpb
+                log_status = rollout.status
                 if rollout.full_ids.numel() > 0:
+                    if log_status == "keep" and (rollout.val_bpb is None or rollout.val_bpb >= prev_best):
+                        log_status = "discard"
                     results.append_result(
-                        "rl", rollout.val_bpb, None, rollout.status, rollout.description
+                        "rl", rollout.val_bpb, None, log_status, rollout.description
                     )
 
                 with open(rollout_log_path, "a") as f:
                     f.write(json.dumps({
                         "step": step, "rollout": attempt,
                         "val_bpb": rollout.val_bpb, "reward": rollout.reward,
-                        "status": rollout.status, "description": rollout.description,
+                        "status": log_status, "description": rollout.description,
                     }) + "\n")
 
         # Free CUDA cache before RL training (train.py subprocess may have fragmented memory)

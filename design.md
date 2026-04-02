@@ -294,7 +294,7 @@ Single in-process model for both generation and training. LoRA weights are alway
 | Function | Description |
 |---|---|
 | `load_model(model_dir, device, lora_rank, lora_alpha, lora_path, attn_impl)` | Load base model + LoRA adapter. Returns `(model, tokenizer)` |
-| `generate_with_logprobs(model, tokenizer, prompt, max_new_tokens, temperature)` | Generate response + collect per-token logprobs. Returns `(text, full_ids, logprobs, prompt_len)` |
+| `generate_with_logprobs(model, tokenizer, prompt, max_new_tokens, temperature)` | Generate response, then recompute logprobs via `compute_response_logprobs` (same KV-cache split path as training) to avoid bfloat16 ratio divergence. Returns `(text, full_ids, logprobs, prompt_len)` |
 | `compute_response_logprobs(model, full_ids, prompt_len, temperature)` | Forward pass with grad for response tokens (KV-cache split: prompt no-grad, response with-grad) |
 | `compute_base_logprobs(model, full_ids, prompt_len, temperature)` | Forward pass with LoRA adapters disabled to get base model logprobs |
 
@@ -371,6 +371,12 @@ PUCTSampler methods:
 5. train.py always resets to parent code after every rollout
 ```
 
+### Known Issues (Fixed)
+
+1. **Ratio explosion at step 0** (ratio_max=93) — `generate_with_logprobs` extracted `old_logprobs` from `model.generate()` (autoregressive, one token at a time), but training computed `new_logprobs` via `compute_response_logprobs` (KV-cache split, parallel forward). In bfloat16+SDPA, these paths produce slightly different floats. On rare low-probability tokens, `exp(new - old)` amplified the difference exponentially (e.g., logprob diff of 4.5 → ratio=93). Since our pipeline is on-policy (same weights for generation and training), the ratio should be exactly 1.0. **Fix:** recompute `old_logprobs` via `compute_response_logprobs` after generation, ensuring both paths are identical. One extra no-grad forward pass per rollout.
+
+2. **results.tsv always showed "keep"** — RL/ERL set `status="keep"` for any successful run, not just improvements. **Fix:** compare `val_bpb` against `best_bpb` when logging to results.tsv/rollouts.jsonl; rollout's internal `.status` unchanged (training uses reward, not status).
+
 ---
 
 ## GPU Memory Limiter
@@ -387,9 +393,115 @@ Tracks allocations in a fixed-size array (64K entries). Thread-safe via `pthread
 
 ---
 
+## ERL Pipeline (Experiential RL)
+
+Implements the ERL framework (arXiv:2602.13949) adapted for train.py optimization. The LLM proposes edits, reflects on batch results, retries with reflection context, and successful corrections are distilled back into the base policy.
+
+### Key Design Decisions
+
+1. **Always-reflect** — reflection on every step, not gated on failure (our task has no binary success/fail)
+2. **One reflection per batch** — model sees all attempt1 results, generates one shared reflection for all attempt2s
+3. **GRPO advantages** — `(reward - mean) / std` normalized within the group (not entropic LOO)
+4. **No PUCT tree** — parent is always the current best code
+5. **Four training signals** — GRPO on attempt1, GRPO on reflection, GRPO on attempt2, RAFT distillation
+6. **LoRA** — not full model fine-tuning (infrastructure constraint, easy to switch later)
+
+### Step Flow
+
+```
+Phase 1: Generate batch_size first attempts, eval in parallel (7 GPUs)
+Phase 2: Build batch feedback from all attempt1 results, generate ONE reflection
+Phase 3: Generate batch_size second attempts using shared reflection, eval in parallel
+Phase 4: Build distillation targets (attempt2s that beat pre-step best_bpb)
+Phase 5: Train — GRPO on attempt1/attempt2/reflection + RAFT on distillation
+Phase 6: Checkpoint LoRA + step_log.json + best_train.py
+```
+
+### Module Reference
+
+#### `erl_main.py` — ERL Entry Point
+
+| Function | Description |
+|---|---|
+| `main()` | CLI parsing, model loading, baseline, phased main loop |
+| `run_baseline(repo_path)` | Run train.py once, return val_bpb |
+| `generate_and_apply(...)` | Generate proposal + apply edits, returns (rollout, edited_code, proposal) |
+| `run_eval_sequential(...)` | Serial mode eval fallback (no Ray) |
+| `dispatch_eval(...)` / `collect_eval(...)` | Ray parallel eval dispatch/collect |
+| `build_distill_ids(...)` | Build distillation target: attempt2 response paired with original prompt |
+
+#### `erl_trainer.py` — GRPO + RAFT Training
+
+| Function | Description |
+|---|---|
+| `compute_grpo_advantages(rewards)` | Normalized group advantages: `(r - mean) / std` |
+| `erl_train_step(model, optimizer, episodes, reflection, ...)` | One training step with 4 signals |
+
+Training signals:
+1. **Attempt1** — GRPO on first-attempt rollouts
+2. **Reflection** — GRPO on reflection tokens, reward = mean(attempt2 rewards), baseline = mean(attempt1 rewards)
+3. **Attempt2** — GRPO on second-attempt rollouts
+4. **Distillation** — RAFT (supervised NLL) on successful attempt2 responses paired with original prompt (no reflection context)
+
+#### `erl_feedback.py` — Batch Feedback
+
+| Function | Description |
+|---|---|
+| `build_attempt_feedback(...)` | Structured feedback for a single attempt |
+| `build_batch_feedback(attempts, best_val_bpb)` | Batch-level feedback with summary stats + per-attempt details |
+
+#### `erl_reflect.py` — Batch Reflection
+
+| Function | Description |
+|---|---|
+| `generate_batch_reflection(model, tokenizer, train_py, batch_feedback, ...)` | Generate one reflection per step with logprobs for training |
+| `build_reflection_context(batch_feedback, reflection_text)` | Build context string appended to attempt2 proposal prompts |
+
+### Data Objects
+
+#### Episode (dataclass, `erl_types.py`)
+
+| Field | Type | Description |
+|---|---|---|
+| `attempt1_rollout` | `Rollout` | First attempt generation artifacts |
+| `attempt1_proposal` | `dict \| None` | Proposal JSON |
+| `attempt1_edited_code` | `str \| None` | Edited train.py code |
+| `attempt1_eval` | `dict \| None` | Eval result from Ray worker |
+| `attempt2_rollout` | `Rollout \| None` | Second attempt (after reflection) |
+| `attempt2_proposal` | `dict \| None` | Second proposal JSON |
+| `attempt2_edited_code` | `str \| None` | Second edited code |
+| `attempt2_eval` | `dict \| None` | Second eval result |
+| `distill_full_ids` | `Tensor \| None` | Distillation token sequence |
+| `distill_prompt_len` | `int` | Distillation prompt length |
+| `train_attempt1/2` | `bool` | Whether to train on this signal |
+| `train_distill` | `bool` | Whether to distill this episode |
+
+#### StepReflection (dataclass, `erl_types.py`)
+
+| Field | Type | Description |
+|---|---|---|
+| `feedback_text` | `str` | Batch feedback input |
+| `reflection_text` | `str` | Model's reflection output |
+| `full_ids` | `Tensor` | Token sequence for training |
+| `old_logprobs` | `Tensor` | Per-token logprobs from generation |
+| `prompt_len` | `int` | Prompt token count |
+| `reward` | `float` | Mean of attempt2 rewards |
+
+### Logs & Checkpoints
+
+| File | Content |
+|---|---|
+| `erl_log/step_log.json` | Per-step: best_bpb, metrics, timing, distill/reflect counts |
+| `erl_log/rollouts.jsonl` | Per-rollout: step, episode, tag, val_bpb, reward, status |
+| `erl_log/lora_step_XXXXXX/` | LoRA adapter checkpoint |
+| `erl_log/best_train.py` | Best code found so far |
+| `results.tsv` | Shared format with frozen/RL pipelines |
+
+---
+
 ## Internal Data Objects
 
-All data objects are plain dicts (frozen pipeline) or dataclasses (RL pipeline). No formal class hierarchy.
+All data objects are plain dicts (frozen pipeline) or dataclasses (RL/ERL pipeline). No formal class hierarchy.
 
 ### ExperimentProposal (dict)
 
@@ -447,6 +559,11 @@ See `rl_types.py` section above.
 | `rl_pipeline/rl_trainer.py` | Reward, advantages, policy gradient step |
 | `rl_pipeline/rl_sampler.py` | PUCT tree search over code states |
 | `rl_pipeline/rl_eval.py` | Ray parallel evaluation workers |
+| `erl_pipeline/erl_main.py` | ERL orchestration — phased loop, no PUCT |
+| `erl_pipeline/erl_trainer.py` | GRPO + RAFT training with 4 signals |
+| `erl_pipeline/erl_feedback.py` | Batch-level structured feedback |
+| `erl_pipeline/erl_reflect.py` | One reflection per step, shared by all attempt2s |
+| `erl_pipeline/erl_types.py` | Episode + StepReflection dataclasses |
 | `gpu_mem_limit/` | Per-process GPU memory capping via LD_PRELOAD |
 
-The LLM decides *what to try*. The harness decides *everything else*. In RL mode, the LLM also *learns from what it tried*.
+The LLM decides *what to try*. The harness decides *everything else*. In RL mode, the LLM *learns from scalar rewards*. In ERL mode, the LLM *reflects on batch results and internalizes corrections*.

@@ -1,141 +1,187 @@
-# Plan: Add RL Training to Autoresearch Scaffold (TTT-Discover Style)
+# Plan: Autoresearch Agent — RL + ERL Pipelines
 
-## Context
+## Overview
 
-The scaffold currently uses a **frozen** Qwen3.5-9B via SGLang to propose experiments. The LLM never learns from outcomes — it sees only the last 10 results in its prompt. TTT-Discover (arxiv 2601.16175) showed that training LLM weights at test time via RL dramatically improves scientific discovery. We adapt their approach: collect batches of (proposal, reward) rollouts, compute entropic advantages with per-token KL penalty, and update LoRA weights via policy gradient.
+Three pipelines for automated train.py optimization, each a different baseline:
 
-## Status: Working End-to-End
+1. **Frozen pipeline** — LLM proposes edits via SGLang API, never learns from outcomes
+2. **RL pipeline (TTT-Discover)** — LLM proposes edits, LoRA weights updated via policy gradient with entropic advantages + PUCT tree search
+3. **ERL pipeline (Experiential RL)** — LLM proposes edits, reflects on batch results, retries with reflection, distills corrections back. GRPO advantages, no tree search.
 
-The RL pipeline is implemented and tested on B200. Single-GPU sequential mode runs successfully: baseline → proposals → train.py eval → RL update → checkpoint.
+---
 
-## Modular Design
+## RL Pipeline (TTT-Discover)
 
-**The frozen pipeline (`main.py`, `planner.py`, `state.py`, `results.py`, `run.sh`) is untouched** (except `main.py` which got a no-op edit skip fix).
+### Status: Running on B200 (8 GPUs, 50 steps)
 
-All RL code lives in `rl_pipeline/`:
+Parallel mode tested and submitted. Model on GPU 0, 7 eval workers on GPUs 1-7, batch_size=7, 50 steps.
 
-```
-llm_scaffold/
-├── main.py, planner.py, state.py, results.py, run.sh   ← frozen pipeline
-└── rl_pipeline/
-    ├── rl_main.py          ← entry point, RL experiment loop
-    ├── rl_model.py         ← HF model + PEFT LoRA + SDPA + gradient checkpointing
-    ├── rl_planner.py       ← wraps planner.py, strips <think> tags, local generation
-    ├── rl_trainer.py       ← entropic advantages, per-token KL penalty, policy gradient
-    ├── rl_sampler.py       ← PUCT tree search (State stores code, not git commits)
-    ├── rl_types.py         ← Rollout dataclass
-    ├── smoke_test.py       ← GPU smoke test (8 components)
-    ├── debug_generate.py   ← debug: generate one proposal, print raw output
-    ├── run_rl.sh           ← SLURM launch script (no SGLang)
-    └── mps.md              ← multi-GPU parallelization plan (Ray)
-```
+### Design
 
-## Key Design Decisions
+- **Entropic LOO advantages** with adaptive beta
+- **PUCT tree search** over code states (State stores full train.py, not git commits)
+- **Per-token KL penalty** against base model (LoRA adapters disabled)
+- **Single local model** — LoRA weights updated in-process, no server sync
 
-1. **Single local model (no SGLang)** — TTT requires the trained model to be the inference model. `optimizer.step()` updates LoRA weights, next `model.generate()` uses them immediately. No sync needed.
-
-2. **SDPA attention** — B200 supports FA4 but `transformers` stable doesn't yet. SDPA dispatches to efficient CUDA kernels. Switch to FA4 when available.
-
-3. **Gradient checkpointing** — enabled to prevent OOM during RL backward pass on long sequences (~10K prompt + ~700 response tokens through a 9B model).
-
-4. **PUCT stores code, not git commits** — `State.code` holds the full train.py text. No git operations in RL mode. PUCT tree persisted as JSON.
-
-5. **Retry on parse failures** — if the model fails to produce valid JSON (e.g., thinking exhausts max_new_tokens), retry up to `batch_size * 2` attempts. Edit failures with valid logprobs are NOT retried — they provide useful negative reward signal for RL.
-
-## Rollout Flow
+### Key Files
 
 ```
-1. Proposal parse fails (no </think>, bad JSON)
-   → full_ids empty → RETRY (no training signal)
+rl_pipeline/
+├── rl_main.py          ← entry point, sequential + parallel (Ray) modes
+├── rl_model.py         ← HF model + PEFT LoRA + SDPA + gradient checkpointing
+├── rl_planner.py       ← wraps planner.py, strips <think> tags, local generation
+├── rl_trainer.py       ← entropic advantages, per-token KL penalty, policy gradient
+├── rl_sampler.py       ← PUCT tree search
+├── rl_eval.py          ← Ray parallel eval workers
+├── rl_types.py         ← Rollout dataclass
+├── run_rl.sh           ← SLURM 8-GPU launch script
+├── smoke_test.py       ← GPU smoke test
+└── debug_generate.py   ← debug: generate one proposal
+```
 
-2. Proposal parses but edits fail (search string not found)
-   → full_ids has data, status="edit_failed", reward=-1.0
-   → counts as valid rollout (useful RL signal, no retry)
+### Rollout Flow
 
-3. Edits apply but train.py crashes/times out
-   → status="crash", reward=-1.0
-   → counts as valid rollout
-
-4. Edits apply and train.py succeeds
-   → status="keep", reward=-val_bpb
-   → child State added to PUCT tree
-
+```
+1. Parse failure (no </think>, bad JSON) → RETRY (no training signal)
+2. Valid JSON but edits fail → reward=-1.0, counts as rollout
+3. Edits apply, train.py crashes → reward=-1.0, counts as rollout
+4. Edits apply, train.py succeeds → reward=-val_bpb, child added to PUCT
 5. train.py always resets to parent code after every rollout
-6. PUCT stores edited code in State.code (not git)
-7. RL training only on rollouts with valid full_ids
 ```
 
-## RL Training Step
-
-```python
-# For each rollout with nonzero advantage:
-new_lp = compute_response_logprobs(model, full_ids, prompt_len)  # with grad
-ratio = exp(new_lp - old_lp)                                     # importance sampling
-
-# Per-token KL penalty (not per-rollout):
-base_lp = compute_base_logprobs(model, full_ids, prompt_len)     # adapters disabled
-shaped_adv = adv - kl_coef * (new_lp - base_lp)
-
-loss = -(ratio * shaped_adv).mean()
-loss.backward()
-# Gradient accumulation across rollouts, then clip + step
-```
-
-Ported from `ttt_autoresearch/train.py:337-391`.
-
-## Qwen3.5 Thinking Mode
-
-Qwen3.5 outputs `<think>...</think>` before the JSON answer. The prompt template includes the opening `<think>` tag, so the model response starts inside the thinking block. `rl_planner.py` strips thinking by splitting on `</think>` and taking everything after it.
-
-If the model exhausts `max_new_tokens` during thinking (no `</think>` in output), the parse fails and the rollout is retried.
-
-## Bug Fixes Applied
-
-1. **Advantages/rollouts misalignment** — advantages computed from `[r.reward for r in rollouts]` (filtered list only)
-2. **RL results not logged** — `results.append_result()` after each rollout
-3. **Baseline re-runs on resume** — guarded by `if args.resume_step is None`
-4. **LoRA not saved/loaded on resume** — `model.save_pretrained()` each step, `PeftModel.from_pretrained()` on resume
-5. **`ensure_results_tsv()` unconditional** — runs on both fresh and resume paths
-6. **`parent.value` truthiness** — changed to `is not None`
-7. **`<think>` tag stripping** — split on `</think>` (opening tag is in prompt, not response)
-8. **OOM during RL backward** — gradient checkpointing + `torch.cuda.empty_cache()`
-9. **No-op edits crash git commit** — skip commit if diff is empty (frozen pipeline fix)
-10. **`flash_attention_4` not supported** — default changed to `sdpa`
-11. **`torch_dtype` deprecated** — changed to `dtype`
-12. **Failed proposals not retried** — retry loop fills batch up to `batch_size * 2` attempts
-
-## CLI Reference
+### CLI
 
 ```bash
 python rl_main.py \
-    --model-dir Qwen/Qwen3.5-9B \
-    --repo-path ./autoresearch_rl \
-    --num-steps 50 \
-    --batch-size 4 \
-    --lr 4e-5 \
-    --kl-coef 0.1 \
-    --puct-c 1.0 \
-    --lora-rank 32 \
-    --lora-alpha 64 \
-    --temperature 1.0 \
-    --max-new-tokens 4096 \
-    --max-grad-norm 1.0 \
-    --attn-impl sdpa \
-    --log-dir ./rl_log \
-    --resume-step N           # resume from checkpoint
+    --model-dir Qwen/Qwen3.5-9B --repo-path ./autoresearch_rl \
+    --model-gpu 0 --eval-gpus 1,2,3,4,5,6,7 --workers-per-gpu 1 \
+    --batch-size 7 --num-steps 50 \
+    --lr 4e-5 --kl-coef 0.1 --puct-c 1.0 \
+    --lora-rank 32 --lora-alpha 64 \
+    --temperature 0.7 --max-new-tokens 8192 \
+    --attn-impl sdpa --log-dir ./rl_log
 ```
 
-## Logs & Checkpoints
+### Bug Fixes Applied
 
-| File | Content |
-|---|---|
-| `rl_log/rollouts.jsonl` | Per-rollout: step, val_bpb, reward, status, description |
-| `rl_log/step_log.json` | Per-step: best_bpb, rewards, loss, KL, ratio stats, timing |
-| `rl_log/puct_step_XXXXXX.json` | PUCT tree checkpoint |
-| `rl_log/lora_step_XXXXXX/` | LoRA adapter checkpoint |
-| `rl_log/best_train.py` | Best code found so far |
-| `results.tsv` | Shared with frozen pipeline format |
+1. Advantages/rollouts misalignment — filtered list only
+2. RL results not logged — `append_result()` after each rollout
+3. Baseline re-runs on resume — guarded by `resume_step is None`
+4. LoRA not saved/loaded on resume
+5. `ensure_results_tsv()` unconditional
+6. `parent.value` truthiness — `is not None`
+7. `<think>` tag stripping — split on `</think>`
+8. OOM during backward — gradient checkpointing + `empty_cache()`
+9. No-op edits crash git commit — skip if diff empty
+10. `flash_attention_4` not supported — default `sdpa`
+11. `torch_dtype` deprecated — changed to `dtype`
+12. Failed proposals not retried — retry up to `batch_size * 2`
+13. Ratio explosion (ratio_max=93 at step 0) — `old_logprobs` were extracted from `generate()` (autoregressive) but `new_logprobs` computed via KV-cache split forward pass. bfloat16+SDPA numerical divergence on rare tokens caused `exp(new-old)` to blow up. Fixed: recompute `old_logprobs` via `compute_response_logprobs()` (same path as training) so ratio=1.0 exactly for on-policy updates.
+14. results.tsv status always "keep" — RL/ERL logged `status="keep"` for every successful run regardless of improvement. Fixed: compare against `best_bpb` to set `keep`/`discard` in logs.
 
-## Next: Multi-GPU Parallelization
+---
 
-See `rl_pipeline/mps.md`. Architecture: 1 GPU for model (generation + RL training), 7 GPUs for parallel train.py eval via Ray workers. Cuts step time from ~42 min to ~12 min for batch_size=7.
+## ERL Pipeline (Experiential RL)
+
+### Status: Code Complete, Pending GPU Test
+
+All files written and compile-checked. Feedback logic tested. Not yet run on GPU. Next step: 2-GPU smoke test, then full 8-GPU run.
+
+### Design (arXiv:2602.13949 adaptation)
+
+- **Always-reflect** — every step, not gated on failure (no binary success/fail in our task)
+- **One reflection per batch** — model sees all attempt1 results, generates one reflection for all attempt2s
+- **GRPO advantages** — `(reward - mean) / std` normalized within the group
+- **No PUCT tree** — parent is always the current best code
+- **Four training signals** — GRPO on attempt1, GRPO on reflection, GRPO on attempt2, RAFT distillation
+- **Train the reflector** — reflection reward = mean(attempt2 rewards), baseline = mean(attempt1 rewards)
+- **LoRA** — same as RL pipeline, easy to switch to full model later
+
+### Key Differences from RL Pipeline
+
+| Aspect | RL (TTT-Discover) | ERL |
+|--------|-------------------|-----|
+| Advantages | Entropic LOO (adaptive beta) | GRPO (normalized group) |
+| Tree search | PUCT | None (always best code) |
+| Reflection | None | Batch-level, one per step |
+| Training signals | 1 (policy gradient) | 4 (attempt1, reflection, attempt2, distill) |
+| Evals per step | batch_size | batch_size × 2 |
+| Step time (est.) | ~15 min | ~25 min |
+
+### Step Flow
+
+```
+Phase 1: Generate + eval batch_size first attempts (parallel, 7 GPUs)
+Phase 2: Build batch feedback, generate ONE reflection
+Phase 3: Generate + eval batch_size second attempts with shared reflection (parallel)
+Phase 4: Build distillation targets (attempt2s that beat pre-step best_bpb)
+Phase 5: Train (4 signals: GRPO × 3 + RAFT × 1)
+Phase 6: Checkpoint (LoRA + step_log.json + best_train.py)
+```
+
+### Key Files
+
+```
+erl_pipeline/
+├── erl_main.py         ← phased loop: all attempt1 → reflect → all attempt2 → train
+├── erl_trainer.py      ← GRPO advantages, 4 training signals
+├── erl_feedback.py     ← batch-level structured feedback
+├── erl_reflect.py      ← one reflection per step, logprobs for training
+├── erl_types.py        ← Episode + StepReflection dataclasses
+├── run_erl.sh          ← SLURM 8-GPU launch script
+└── (reuses rl_model.py, rl_eval.py, rl_planner.py, rl_types.py from rl_pipeline)
+```
+
+### CLI
+
+```bash
+python erl_main.py \
+    --model-dir Qwen/Qwen3.5-9B --repo-path ./autoresearch_rl \
+    --model-gpu 0 --eval-gpus 1,2,3,4,5,6,7 --workers-per-gpu 1 \
+    --batch-size 7 --num-steps 50 \
+    --lr 4e-5 --kl-coef 0.1 \
+    --lora-rank 32 --lora-alpha 64 \
+    --temperature 0.7 --max-new-tokens 8192 \
+    --attn-impl sdpa --log-dir ./erl_log
+```
+
+### Bug Fixes Applied
+
+1. Serial mode never evaluated experiments — added `run_eval_sequential()` fallback
+2. Distillation threshold used post-mutation `best_bpb` — split Phase 4 into distill-first, then update
+3. Resume left `step_log` undefined when `step_log.json` missing — added `step_log = []`
+4. `build_distill_ids` used updated `best_val_bpb` — temporarily restore pre-step value
+5. Reflection advantage baseline used filtered rollout list — changed to all episode rewards
+
+---
+
+## Shared Infrastructure
+
+### Model & Hardware
+- **Model**: Qwen/Qwen3.5-9B with LoRA (rank 32, alpha 64)
+- **Cluster**: HiPerGator B200, 180GB VRAM per GPU, 8 GPUs per node
+- **CUDA**: 12.8.1, GCC 14.2.0, SDPA attention (FA4 not yet available)
+- **Each train.py**: ~74GB VRAM, ~5 min per run
+
+### Reused Modules (never duplicated)
+- `planner.py` — prompt building, edit validation/application
+- `results.py` — metric parsing, results logging
+- `state.py` — file I/O
+- `rl_model.py` — model loading, generation with logprobs, training forward pass
+- `rl_eval.py` — Ray parallel eval workers
+- `rl_planner.py` — local generation wrapper
+- `rl_types.py` — Rollout dataclass
+
+### gpu_mem_limit/
+LD_PRELOAD library to cap per-process GPU memory (mimics MIG). Written, not yet tested on cluster.
+
+---
+
+## Next Steps
+
+1. **Check RL pipeline results** — 50-step run submitted, check `rl_log/step_log.json`
+2. **Smoke test ERL** — 2 GPUs, 3 steps, batch_size=2
+3. **Full ERL run** — `sbatch erl_pipeline/run_erl.sh`
+4. **Compare RL vs ERL** — same model, same steps, compare best_bpb curves
+5. **gpu_mem_limit testing** — run `test_memlimit.sh` on cluster, then integrate into run scripts for multi-worker-per-GPU
+6. **Structured reflection template** — refine `REFLECTION_SYSTEM` prompt with domain-specific structure (currently placeholder)
