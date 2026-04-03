@@ -17,11 +17,11 @@ from rl_types import Rollout
 # Reward
 # ---------------------------------------------------------------------------
 
-def compute_reward(val_bpb: float | None, status: str) -> float:
-    """Reward = -val_bpb for success, -1.0 for failure."""
+def compute_reward(val_bpb: float | None, status: str, best_bpb: float = float("inf")) -> float:
+    """Binary reward: 1.0 if improved, 0.0 if not, -1.0 if crash/edit_failed."""
     if status in ("crash", "edit_failed") or val_bpb is None:
         return -1.0
-    return -val_bpb
+    return 1.0 if val_bpb < best_bpb else 0.0
 
 
 # ---------------------------------------------------------------------------

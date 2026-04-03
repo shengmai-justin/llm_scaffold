@@ -250,7 +250,7 @@ def run_single_rollout(
             output_text = log_text[-2000:]
             print(f"  No metrics\n{results.extract_error_tail(log_text)}")
 
-    reward = compute_reward(val_bpb, status)
+    reward = compute_reward(val_bpb, status, best_bpb=agent_state["best_val_bpb"])
     rollout.val_bpb = val_bpb
     rollout.status = status
     rollout.reward = reward
@@ -488,7 +488,7 @@ def main():
                 result = ray.get(ref)
                 rollout.val_bpb = result["val_bpb"]
                 rollout.status = "keep" if result["success"] else "crash"
-                rollout.reward = compute_reward(rollout.val_bpb, rollout.status)
+                rollout.reward = compute_reward(rollout.val_bpb, rollout.status, best_bpb=best_bpb)
 
                 val_str = f"{rollout.val_bpb:.6f}" if rollout.val_bpb is not None else "—"
                 print(f"  Eval result: val_bpb={val_str}  reward={rollout.reward:.4f}")
