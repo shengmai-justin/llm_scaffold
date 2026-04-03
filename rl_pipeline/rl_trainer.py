@@ -17,11 +17,16 @@ from rl_types import Rollout
 # Reward
 # ---------------------------------------------------------------------------
 
-def compute_reward(val_bpb: float | None, status: str, best_bpb: float = float("inf")) -> float:
-    """Binary reward: 1.0 if improved, 0.0 if not, -1.0 if crash/edit_failed."""
+def compute_reward(val_bpb: float | None, status: str) -> float:
+    """Reward = 1/val_bpb for success, 0.0 for failure.
+
+    Matches TTT-Discover's pattern for minimization tasks (erdos_min_overlap):
+    inverse creates a natural gap between failure (0.0) and success (~1.0),
+    keeping entropic advantages stable even with small batch sizes.
+    """
     if status in ("crash", "edit_failed") or val_bpb is None:
-        return -1.0
-    return 1.0 if val_bpb < best_bpb else 0.0
+        return 0.0
+    return 1.0 / max(val_bpb, 1e-8)
 
 
 # ---------------------------------------------------------------------------

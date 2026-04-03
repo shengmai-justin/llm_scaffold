@@ -4,15 +4,15 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=100gb
-#SBATCH --time=4-00:00:00
+#SBATCH --time=12:00:00
 #SBATCH --partition=hpg-b200
-#SBATCH --gpus=2
+#SBATCH --gpus=4
 
 # ── Configuration ─────────────────────────────────────────────
 MODEL="Qwen/Qwen3.5-9B"
 NUM_STEPS=50
 MODEL_GPU=0
-EVAL_GPUS="1"
+EVAL_GPUS="1,2,3"
 BATCH_SIZE=3
 WORKERS_PER_GPU=1
 KL_COEF=0.1

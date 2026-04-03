@@ -62,7 +62,7 @@ def make_empty_rollout(status="edit_failed", description="failed"):
     return Rollout(
         prompt_text="", proposal_text="", full_ids=torch.tensor([]),
         old_logprobs=torch.tensor([]), prompt_len=0,
-        val_bpb=None, status=status, reward=-1.0, description=description,
+        val_bpb=None, status=status, reward=0.0, description=description,
     )
 
 
@@ -150,29 +150,29 @@ def run_test(name, fn):
 
 def test_grpo_normal():
     """GRPO with distinct rewards produces non-zero advantages that sum near zero."""
-    rewards = [-0.9, -0.95, -1.0, -0.85]
+    rewards = [1.087, 1.053, 0.0, 1.176]  # 1/val_bpb for successes, 0.0 for crash
     advs = compute_grpo_advantages(rewards)
     assert advs.shape == (4,), f"Expected shape (4,), got {advs.shape}"
     assert abs(advs.mean().item()) < 1e-5, f"Mean not near zero: {advs.mean().item()}"
-    assert advs.std().item() > 0.5, f"Std too low, advantages not spreading: {advs.std().item()}"
+    assert advs.std().item() > 0.1, f"Std too low, advantages not spreading: {advs.std().item()}"
 
 
 def test_grpo_identical_rewards():
     """All identical rewards -> all advantages zero."""
-    advs = compute_grpo_advantages([-1.0, -1.0, -1.0])
+    advs = compute_grpo_advantages([1.01, 1.01, 1.01])
     assert torch.all(advs == 0), f"Expected all zeros, got {advs}"
 
 
 def test_grpo_single_reward():
     """Single reward -> advantage zero (can't normalize)."""
-    advs = compute_grpo_advantages([-0.9])
+    advs = compute_grpo_advantages([1.01])
     assert advs.shape == (1,)
     assert advs[0].item() == 0.0
 
 
 def test_grpo_two_rewards():
     """Two rewards: one positive advantage, one negative."""
-    advs = compute_grpo_advantages([-0.9, -1.0])
+    advs = compute_grpo_advantages([1.05, 0.0])  # success vs crash
     assert advs.shape == (2,)
     assert advs[0].item() > 0, f"Better reward should have positive advantage"
     assert advs[1].item() < 0, f"Worse reward should have negative advantage"
@@ -291,16 +291,16 @@ def test_train_happy_path():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
     episodes = [
-        make_episode(a1_bpb=0.92, a1_reward=-0.92, a2_bpb=0.88, a2_reward=-0.88, train_distill=True),
-        make_episode(a1_bpb=0.95, a1_reward=-0.95, a2_bpb=0.93, a2_reward=-0.93),
-        make_episode(a1_bpb=1.00, a1_reward=-1.00, a2_bpb=0.97, a2_reward=-0.97),
+        make_episode(a1_bpb=0.92, a1_reward=1.087, a2_bpb=0.88, a2_reward=1.136, train_distill=True),
+        make_episode(a1_bpb=0.95, a1_reward=1.053, a2_bpb=0.93, a2_reward=1.075),
+        make_episode(a1_bpb=1.00, a1_reward=1.000, a2_bpb=0.97, a2_reward=1.031),
     ]
     # Manually set distill data on first episode
     episodes[0].distill_full_ids = torch.randint(0, 1000, (15,))
     episodes[0].distill_logprobs = torch.randn(10)
     episodes[0].distill_prompt_len = 5
 
-    reflection = make_reflection(reward=-0.90)
+    reflection = make_reflection(reward=1.05)
 
     metrics = erl_train_step(
         model, optimizer, episodes, reflection,
@@ -319,11 +319,11 @@ def test_train_all_attempt1_failed():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
     episodes = [
-        make_episode(a1_empty=True, a2_bpb=0.93, a2_reward=-0.93),
-        make_episode(a1_empty=True, a2_bpb=0.95, a2_reward=-0.95),
+        make_episode(a1_empty=True, a2_bpb=0.93, a2_reward=1.075),
+        make_episode(a1_empty=True, a2_bpb=0.95, a2_reward=1.053),
     ]
 
-    reflection = make_reflection(reward=-0.94)
+    reflection = make_reflection(reward=1.064)
 
     metrics = erl_train_step(
         model, optimizer, episodes, reflection,
@@ -341,12 +341,12 @@ def test_train_no_distill():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
     episodes = [
-        make_episode(a1_bpb=0.95, a1_reward=-0.95, a2_bpb=0.96, a2_reward=-0.96),
-        make_episode(a1_bpb=0.97, a1_reward=-0.97, a2_bpb=0.98, a2_reward=-0.98),
+        make_episode(a1_bpb=0.95, a1_reward=1.053, a2_bpb=0.96, a2_reward=1.042),
+        make_episode(a1_bpb=0.97, a1_reward=1.031, a2_bpb=0.98, a2_reward=1.020),
     ]
     # No distill flags set
 
-    reflection = make_reflection(reward=-0.97)
+    reflection = make_reflection(reward=1.031)
 
     metrics = erl_train_step(
         model, optimizer, episodes, reflection,
@@ -364,10 +364,10 @@ def test_train_single_rollout():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
     episodes = [
-        make_episode(a1_bpb=0.95, a1_reward=-0.95, a2_bpb=0.93, a2_reward=-0.93),
+        make_episode(a1_bpb=0.95, a1_reward=1.053, a2_bpb=0.93, a2_reward=1.075),
     ]
 
-    reflection = make_reflection(reward=-0.93)
+    reflection = make_reflection(reward=1.075)
 
     metrics = erl_train_step(
         model, optimizer, episodes, reflection,
@@ -385,8 +385,8 @@ def test_train_no_reflection():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
     episodes = [
-        make_episode(a1_bpb=0.92, a1_reward=-0.92, a2_bpb=0.90, a2_reward=-0.90),
-        make_episode(a1_bpb=0.95, a1_reward=-0.95, a2_bpb=0.93, a2_reward=-0.93),
+        make_episode(a1_bpb=0.92, a1_reward=1.087, a2_bpb=0.90, a2_reward=1.111),
+        make_episode(a1_bpb=0.95, a1_reward=1.053, a2_bpb=0.93, a2_reward=1.075),
     ]
 
     metrics = erl_train_step(
@@ -404,13 +404,13 @@ def test_train_all_same_rewards():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
     episodes = [
-        make_episode(a1_bpb=0.95, a1_reward=-0.95, a2_bpb=0.95, a2_reward=-0.95),
-        make_episode(a1_bpb=0.95, a1_reward=-0.95, a2_bpb=0.95, a2_reward=-0.95),
-        make_episode(a1_bpb=0.95, a1_reward=-0.95, a2_bpb=0.95, a2_reward=-0.95),
+        make_episode(a1_bpb=0.95, a1_reward=1.053, a2_bpb=0.95, a2_reward=1.053),
+        make_episode(a1_bpb=0.95, a1_reward=1.053, a2_bpb=0.95, a2_reward=1.053),
+        make_episode(a1_bpb=0.95, a1_reward=1.053, a2_bpb=0.95, a2_reward=1.053),
     ]
 
-    reflection = make_reflection(reward=-0.95)
-    # reflection advantage = reward - mean(a1 rewards) = -0.95 - (-0.95) = 0 -> skip
+    reflection = make_reflection(reward=1.053)
+    # reflection advantage = reward - mean(a1 rewards) = 1.053 - 1.053 = 0 -> skip
 
     metrics = erl_train_step(
         model, optimizer, episodes, reflection,
@@ -429,12 +429,12 @@ def test_train_mixed_empty_and_valid():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
     episodes = [
-        make_episode(a1_bpb=0.92, a1_reward=-0.92, a2_bpb=0.90, a2_reward=-0.90),
+        make_episode(a1_bpb=0.92, a1_reward=1.087, a2_bpb=0.90, a2_reward=1.111),
         make_episode(a1_empty=True, a2_empty=True),
-        make_episode(a1_bpb=0.97, a1_reward=-0.97, a2_bpb=0.95, a2_reward=-0.95),
+        make_episode(a1_bpb=0.97, a1_reward=1.031, a2_bpb=0.95, a2_reward=1.053),
     ]
 
-    reflection = make_reflection(reward=-0.92)
+    reflection = make_reflection(reward=1.082)
 
     metrics = erl_train_step(
         model, optimizer, episodes, reflection,
@@ -450,11 +450,11 @@ def test_train_zero_kl():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
     episodes = [
-        make_episode(a1_bpb=0.92, a1_reward=-0.92, a2_bpb=0.90, a2_reward=-0.90),
-        make_episode(a1_bpb=0.97, a1_reward=-0.97, a2_bpb=0.95, a2_reward=-0.95),
+        make_episode(a1_bpb=0.92, a1_reward=1.087, a2_bpb=0.90, a2_reward=1.111),
+        make_episode(a1_bpb=0.97, a1_reward=1.031, a2_bpb=0.95, a2_reward=1.053),
     ]
 
-    reflection = make_reflection(reward=-0.92)
+    reflection = make_reflection(reward=1.082)
 
     metrics = erl_train_step(
         model, optimizer, episodes, reflection,
@@ -471,10 +471,10 @@ def test_distill_only_improvements():
     """Only attempt2s strictly below pre-step best get distilled."""
     best_bpb = 0.95
     episodes = [
-        make_episode(a2_bpb=0.93, a2_reward=-0.93),  # improved -> distill
-        make_episode(a2_bpb=0.95, a2_reward=-0.95),  # equal -> NO distill
-        make_episode(a2_bpb=0.97, a2_reward=-0.97),  # worse -> NO distill
-        make_episode(a2_bpb=None, a2_status="crash", a2_reward=-1.0),  # crash -> NO
+        make_episode(a2_bpb=0.93, a2_reward=1.075),  # improved -> distill
+        make_episode(a2_bpb=0.95, a2_reward=1.053),  # equal -> NO distill
+        make_episode(a2_bpb=0.97, a2_reward=1.031),  # worse -> NO distill
+        make_episode(a2_bpb=None, a2_status="crash", a2_reward=0.0),  # crash -> NO
     ]
 
     distill_count = 0

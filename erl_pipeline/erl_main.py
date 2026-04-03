@@ -107,17 +107,17 @@ def dispatch_eval(workers, worker_idx, parent_code, edited_code, step):
     return worker.evaluate.remote(parent_code, edited_code, step)
 
 
-def collect_eval(ref, rollout, best_bpb=float("inf")):
+def collect_eval(ref, rollout):
     """Collect eval result from Ray future, update rollout."""
     import ray
     result = ray.get(ref)
     rollout.val_bpb = result["val_bpb"]
     rollout.status = "keep" if result["success"] else "crash"
-    rollout.reward = compute_reward(rollout.val_bpb, rollout.status, best_bpb=best_bpb)
+    rollout.reward = compute_reward(rollout.val_bpb, rollout.status)
     return result
 
 
-def run_eval_sequential(repo_path, parent_code, edited_code, train_path, rollout, best_bpb=float("inf")):
+def run_eval_sequential(repo_path, parent_code, edited_code, train_path, rollout):
     """Run train.py sequentially (no Ray). Updates rollout in place, returns result dict."""
     state_mod.write_file(train_path, edited_code)
     run_result = results.run_experiment(repo_path, timeout_seconds=TRAIN_TIMEOUT)
@@ -142,7 +142,7 @@ def run_eval_sequential(repo_path, parent_code, edited_code, train_path, rollout
     success = val_bpb is not None
     rollout.val_bpb = val_bpb
     rollout.status = "keep" if success else "crash"
-    rollout.reward = compute_reward(val_bpb, rollout.status, best_bpb=best_bpb)
+    rollout.reward = compute_reward(val_bpb, rollout.status)
     return {"val_bpb": val_bpb, "peak_vram_mb": peak_vram_mb,
             "output": output_text, "success": success}
 
@@ -333,7 +333,7 @@ def main():
                 a1_refs.append((ref, g))
             elif edited_code is not None:
                 # Serial mode: run eval immediately
-                result = run_eval_sequential(repo_path, best_code, edited_code, train_path, rollout, best_bpb=best_bpb)
+                result = run_eval_sequential(repo_path, best_code, edited_code, train_path, rollout)
                 ep.attempt1_eval = result
                 val_str = f"{rollout.val_bpb:.6f}" if rollout.val_bpb else "---"
                 print(f"  Attempt1 {g+1} result: val_bpb={val_str}  reward={rollout.reward:.4f}")
@@ -343,7 +343,7 @@ def main():
         # Collect attempt1 eval results (parallel mode only)
         for ref, idx in a1_refs:
             ep = episodes[idx]
-            result = collect_eval(ref, ep.attempt1_rollout, best_bpb=best_bpb)
+            result = collect_eval(ref, ep.attempt1_rollout)
             ep.attempt1_eval = result
             val_str = f"{ep.attempt1_rollout.val_bpb:.6f}" if ep.attempt1_rollout.val_bpb else "---"
             print(f"  Attempt1 {idx+1} result: val_bpb={val_str}  reward={ep.attempt1_rollout.reward:.4f}")
@@ -399,7 +399,7 @@ def main():
                 a2_refs.append((ref, g))
             elif edited2 is not None:
                 # Serial mode
-                result = run_eval_sequential(repo_path, best_code, edited2, train_path, rollout2, best_bpb=best_bpb)
+                result = run_eval_sequential(repo_path, best_code, edited2, train_path, rollout2)
                 ep.attempt2_eval = result
                 val_str = f"{rollout2.val_bpb:.6f}" if rollout2.val_bpb else "---"
                 print(f"  Attempt2 {g+1} result: val_bpb={val_str}  reward={rollout2.reward:.4f}")
@@ -409,7 +409,7 @@ def main():
         # Collect attempt2 eval results (parallel mode only)
         for ref, idx in a2_refs:
             ep = episodes[idx]
-            result = collect_eval(ref, ep.attempt2_rollout, best_bpb=best_bpb)
+            result = collect_eval(ref, ep.attempt2_rollout)
             ep.attempt2_eval = result
             val_str = f"{ep.attempt2_rollout.val_bpb:.6f}" if ep.attempt2_rollout.val_bpb else "---"
             print(f"  Attempt2 {idx+1} result: val_bpb={val_str}  reward={ep.attempt2_rollout.reward:.4f}")
