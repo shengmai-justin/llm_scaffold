@@ -240,8 +240,9 @@ def main():
     workers = None
     if parallel_mode:
         import ray
+        runtime_env = {"env_vars": {"PYTHONPATH": RL_PIPELINE_DIR}}
+        ray.init(ignore_reinit_error=True, runtime_env=runtime_env)
         from rl_eval import EvalWorker
-        ray.init(ignore_reinit_error=True)
         eval_gpu_ids = [int(g) for g in args.eval_gpus.split(",")]
         expanded = [g for g in eval_gpu_ids for _ in range(args.workers_per_gpu)]
         workers = [EvalWorker.remote(gpu, repo_path, i) for i, gpu in enumerate(expanded)]
