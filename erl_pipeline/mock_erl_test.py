@@ -291,8 +291,7 @@ def test_train_happy_path():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
     episodes = [
-        make_episode(a1_bpb=0.92, a1_reward=-0.92, a2_bpb=0.88, a2_reward=-0.88, train_distill=True,
-                     distill_full_ids_len=15),
+        make_episode(a1_bpb=0.92, a1_reward=-0.92, a2_bpb=0.88, a2_reward=-0.88, train_distill=True),
         make_episode(a1_bpb=0.95, a1_reward=-0.95, a2_bpb=0.93, a2_reward=-0.93),
         make_episode(a1_bpb=1.00, a1_reward=-1.00, a2_bpb=0.97, a2_reward=-0.97),
     ]

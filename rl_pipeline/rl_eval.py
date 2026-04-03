@@ -16,7 +16,8 @@ import ray
 
 def create_worker_repo(base_repo: str, worker_id: int) -> str:
     """Create isolated repo copy for a worker."""
-    worker_dir = os.path.join(os.path.dirname(base_repo), f"eval_worker_{worker_id}")
+    repo_name = os.path.basename(base_repo)
+    worker_dir = os.path.join(os.path.dirname(base_repo), f"{repo_name}_worker_{worker_id}")
     if not os.path.exists(worker_dir):
         shutil.copytree(base_repo, worker_dir)
     return worker_dir

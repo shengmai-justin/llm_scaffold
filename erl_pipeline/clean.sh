@@ -1,18 +1,18 @@
 #!/bin/bash
-# Clean up artifacts from a previous RL pipeline run.
+# Clean up artifacts from a previous ERL pipeline run.
 # Run from the llm_scaffold/ directory, or set SCAFFOLD_DIR.
 #
 # Usage:
-#   bash rl_pipeline/clean.sh          # uses paths from run_rl.sh
-#   bash rl_pipeline/clean.sh --dry-run # show what would be deleted
+#   bash erl_pipeline/clean.sh          # delete artifacts
+#   bash erl_pipeline/clean.sh --dry-run # show what would be deleted
 
 set -euo pipefail
 
-# ── Paths (match run_rl.sh) ──────────────────────────────────
+# ── Paths (match run_erl.sh) ─────────────────────────────────
 PROJ_DIR="${PROJ_DIR:-/blue/buyuheng/li_an.ucsb/proj_yepeng}"
 SCAFFOLD_DIR="${SCAFFOLD_DIR:-${PROJ_DIR}/llm_scaffold_rl/llm_scaffold}"
-RL_REPO="${SCAFFOLD_DIR}/autoresearch_rl"
-RL_LOG="${SCAFFOLD_DIR}/rl_pipeline/rl_log"
+ERL_REPO="${SCAFFOLD_DIR}/autoresearch_erl"
+ERL_LOG="${SCAFFOLD_DIR}/erl_pipeline/erl_log"
 
 DRY_RUN=false
 if [[ "${1:-}" == "--dry-run" ]]; then
@@ -33,16 +33,16 @@ delete() {
 }
 
 # ── Copied repo ──────────────────────────────────────────────
-delete "$RL_REPO"
+delete "$ERL_REPO"
 
-# ── Ray eval worker copies (autoresearch_rl_worker_0, ...) ───
-for d in "${SCAFFOLD_DIR}"/autoresearch_rl_worker_*; do
+# ── Ray eval worker copies (autoresearch_erl_worker_0, ...) ──
+for d in "${SCAFFOLD_DIR}"/autoresearch_erl_worker_*; do
     delete "$d"
 done
 
-# ── RL logs + checkpoints (includes results.tsv) ─────────────
-delete "$RL_LOG"
+# ── ERL logs + checkpoints (includes results.tsv) ────────────
+delete "$ERL_LOG"
 
 if ! $DRY_RUN; then
-    echo "Done. Ready for a fresh run."
+    echo "Done. Ready for a fresh ERL run."
 fi

@@ -1,20 +1,19 @@
 #!/bin/bash
-#SBATCH --job-name=autoresearch-erl
+#SBATCH --job-name=autoresearch-erl-4gpu
 #SBATCH --output=autoresearch_erl_%j.log
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=100gb
 #SBATCH --time=4-00:00:00
 #SBATCH --partition=hpg-b200
-#SBATCH --gpus=8
+#SBATCH --gpus=4
 
 # ── Configuration ─────────────────────────────────────────────
 MODEL="Qwen/Qwen3.5-9B"
 NUM_STEPS=50
 MODEL_GPU=0
-EVAL_GPUS="1,2,3,4,5,6,7"
-# batch_size=7: 7 attempt1 + 7 attempt2 = 14 evals per step (2 waves on 7 GPUs)
-BATCH_SIZE=7
+EVAL_GPUS="1,2,3"
+BATCH_SIZE=3
 WORKERS_PER_GPU=1
 KL_COEF=0.1
 LR=4e-5
@@ -43,13 +42,13 @@ echo "Job ID:    $SLURM_JOB_ID"
 echo "Node:      $(hostname)"
 echo "GPUs:      $(nvidia-smi -L 2>/dev/null | wc -l)"
 echo "Model:     $MODEL"
-echo "Mode:      ERL v2 (phased, batch reflection, GRPO, no PUCT)"
+echo "Mode:      ERL v2 4-GPU (model=GPU0, eval=GPU1-3)"
 echo "Started:   $(date)"
 echo "---"
 
 cd "$SOURCE_REPO" && uv sync && cd "${SCAFFOLD_DIR}/erl_pipeline"
 
-echo "Starting ERL experiment loop..."
+echo "Starting ERL experiment loop (4 GPUs)..."
 python erl_main.py \
     --repo-path "$ERL_REPO" \
     --source-repo "$SOURCE_REPO" \
