@@ -364,6 +364,7 @@ def main():
     )
 
     results.RESULTS_FILE = os.path.join(args.log_dir, "results.tsv")
+    results.RUN_LOG = os.path.join(args.log_dir, "run.log")
     results.ensure_results_tsv()
 
     # PUCT sampler — resume or fresh start
