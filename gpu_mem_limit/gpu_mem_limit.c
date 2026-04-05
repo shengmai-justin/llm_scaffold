@@ -175,12 +175,20 @@ static void do_init(void) {
     real_cudaMallocAsync = (cudaMallocAsync_fn)dlsym(RTLD_NEXT, "cudaMallocAsync");
     real_cudaFreeAsync   = (cudaFreeAsync_fn)dlsym(RTLD_NEXT, "cudaFreeAsync");
 
-    /* Driver API */
-    real_cuMemCreate     = (cuMemCreate_fn)dlsym(RTLD_NEXT, "cuMemCreate");
-    real_cuMemRelease    = (cuMemRelease_fn)dlsym(RTLD_NEXT, "cuMemRelease");
-    real_cuMemAlloc_v2   = (cuMemAlloc_v2_fn)dlsym(RTLD_NEXT, "cuMemAlloc_v2");
-    real_cuMemFree_v2    = (cuMemFree_v2_fn)dlsym(RTLD_NEXT, "cuMemFree_v2");
-    real_cuMemGetInfo_v2 = (cuMemGetInfo_v2_fn)dlsym(RTLD_NEXT, "cuMemGetInfo_v2");
+    /* Driver API — libcuda.so is typically dlopen'd by the runtime,
+       so RTLD_NEXT won't find it.  Open it directly (RTLD_NOLOAD
+       just grabs the already-loaded handle, no new load). */
+    void *cuda_drv = dlopen("libcuda.so.1", RTLD_LAZY | RTLD_NOLOAD);
+    if (!cuda_drv)
+        cuda_drv = dlopen("libcuda.so", RTLD_LAZY | RTLD_NOLOAD);
+    if (cuda_drv) {
+        real_cuMemCreate     = (cuMemCreate_fn)dlsym(cuda_drv, "cuMemCreate");
+        real_cuMemRelease    = (cuMemRelease_fn)dlsym(cuda_drv, "cuMemRelease");
+        real_cuMemAlloc_v2   = (cuMemAlloc_v2_fn)dlsym(cuda_drv, "cuMemAlloc_v2");
+        real_cuMemFree_v2    = (cuMemFree_v2_fn)dlsym(cuda_drv, "cuMemFree_v2");
+        real_cuMemGetInfo_v2 = (cuMemGetInfo_v2_fn)dlsym(cuda_drv, "cuMemGetInfo_v2");
+        dlclose(cuda_drv);
+    }
 
     /* Log which functions we found */
     fprintf(stderr, "[gpu_mem_limit] intercepting:");

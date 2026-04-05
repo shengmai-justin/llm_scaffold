@@ -65,7 +65,7 @@ except torch.cuda.OutOfMemoryError:
 # ── Test 3: OOM with expandable_segments=True ──────────────
 echo ""
 echo "=== Test 3: OOM with expandable_segments enabled ==="
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+PYTORCH_ALLOC_CONF=expandable_segments:True \
 GPU_MEM_LIMIT_MB=500 LD_PRELOAD="$LIB_PATH" python3 -c "
 import torch
 try:
