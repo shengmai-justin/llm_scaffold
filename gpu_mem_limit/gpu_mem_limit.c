@@ -104,6 +104,10 @@ static void ht_insert(ht_t *ht, uint64_t key, size_t size) {
     if (ht->entries == NULL) {
         ht->capacity = HT_INIT_CAP;
         ht->entries = (ht_entry_t *)calloc(HT_INIT_CAP, sizeof(ht_entry_t));
+        if (!ht->entries) {
+            fprintf(stderr, "[gpu_mem_limit] FATAL: calloc failed during init\n");
+            abort();
+        }
     }
     if ((double)ht->count / ht->capacity > HT_LOAD_MAX)
         ht_grow(ht);
@@ -136,6 +140,11 @@ static size_t          g_used_bytes  = 0;
 static ht_t            g_ht          = {NULL, 0, 0};
 static pthread_mutex_t g_lock        = PTHREAD_MUTEX_INITIALIZER;
 static pthread_once_t  g_once        = PTHREAD_ONCE_INIT;
+
+/* Recursion guard: prevents double-counting when a runtime API call
+   (e.g. cudaMalloc) internally dispatches to a driver API call
+   (e.g. cuMemAlloc_v2) through the PLT. */
+static __thread int g_in_hook = 0;
 
 /* Real function pointers */
 static cudaMalloc_fn      real_cudaMalloc      = NULL;
@@ -221,7 +230,9 @@ cudaError_t cudaMalloc(void **devPtr, size_t size) {
         pthread_mutex_unlock(&g_lock);
         return cudaErrorMemoryAllocation;
     }
+    g_in_hook = 1;
     cudaError_t res = real_cudaMalloc(devPtr, size);
+    g_in_hook = 0;
     if (res == cudaSuccess) {
         ht_insert(&g_ht, (uint64_t)(uintptr_t)*devPtr, size);
     } else {
@@ -235,7 +246,9 @@ cudaError_t cudaFree(void *devPtr) {
     init();
     if (!real_cudaFree) return cudaSuccess;
 
+    g_in_hook = 1;
     cudaError_t res = real_cudaFree(devPtr);
+    g_in_hook = 0;
     if (res == cudaSuccess && devPtr) {
         pthread_mutex_lock(&g_lock);
         do_free((uint64_t)(uintptr_t)devPtr);
@@ -248,7 +261,9 @@ cudaError_t cudaMemGetInfo(size_t *free_out, size_t *total_out) {
     init();
     if (!real_cudaMemGetInfo) return 1;
 
+    g_in_hook = 1;
     cudaError_t res = real_cudaMemGetInfo(free_out, total_out);
+    g_in_hook = 0;
     if (res == cudaSuccess && g_limit_bytes > 0) {
         pthread_mutex_lock(&g_lock);
         *total_out = g_limit_bytes;
@@ -268,7 +283,9 @@ cudaError_t cudaMallocAsync(void **devPtr, size_t size, cudaStream_t stream) {
         pthread_mutex_unlock(&g_lock);
         return cudaErrorMemoryAllocation;
     }
+    g_in_hook = 1;
     cudaError_t res = real_cudaMallocAsync(devPtr, size, stream);
+    g_in_hook = 0;
     if (res == cudaSuccess) {
         ht_insert(&g_ht, (uint64_t)(uintptr_t)*devPtr, size);
     } else {
@@ -282,7 +299,9 @@ cudaError_t cudaFreeAsync(void *devPtr, cudaStream_t stream) {
     init();
     if (!real_cudaFreeAsync) return cudaSuccess;
 
+    g_in_hook = 1;
     cudaError_t res = real_cudaFreeAsync(devPtr, stream);
+    g_in_hook = 0;
     if (res == cudaSuccess && devPtr) {
         pthread_mutex_lock(&g_lock);
         do_free((uint64_t)(uintptr_t)devPtr);
@@ -297,6 +316,7 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
                      const void *prop, unsigned long long flags) {
     init();
     if (!real_cuMemCreate) return CUDA_ERROR_OUT_OF_MEMORY;
+    if (g_in_hook) return real_cuMemCreate(handle, size, prop, flags);
 
     pthread_mutex_lock(&g_lock);
     if (!try_alloc(size)) {
@@ -316,6 +336,7 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
 CUresult cuMemRelease(CUmemGenericAllocationHandle handle) {
     init();
     if (!real_cuMemRelease) return CUDA_SUCCESS;
+    if (g_in_hook) return real_cuMemRelease(handle);
 
     CUresult res = real_cuMemRelease(handle);
     if (res == CUDA_SUCCESS) {
@@ -329,6 +350,7 @@ CUresult cuMemRelease(CUmemGenericAllocationHandle handle) {
 CUresult cuMemAlloc_v2(CUdeviceptr *dptr, size_t size) {
     init();
     if (!real_cuMemAlloc_v2) return CUDA_ERROR_OUT_OF_MEMORY;
+    if (g_in_hook) return real_cuMemAlloc_v2(dptr, size);
 
     pthread_mutex_lock(&g_lock);
     if (!try_alloc(size)) {
@@ -348,6 +370,7 @@ CUresult cuMemAlloc_v2(CUdeviceptr *dptr, size_t size) {
 CUresult cuMemFree_v2(CUdeviceptr dptr) {
     init();
     if (!real_cuMemFree_v2) return CUDA_SUCCESS;
+    if (g_in_hook) return real_cuMemFree_v2(dptr);
 
     CUresult res = real_cuMemFree_v2(dptr);
     if (res == CUDA_SUCCESS && dptr != 0) {
@@ -361,6 +384,7 @@ CUresult cuMemFree_v2(CUdeviceptr dptr) {
 CUresult cuMemGetInfo_v2(size_t *free_out, size_t *total_out) {
     init();
     if (!real_cuMemGetInfo_v2) return 1;
+    if (g_in_hook) return real_cuMemGetInfo_v2(free_out, total_out);
 
     CUresult res = real_cuMemGetInfo_v2(free_out, total_out);
     if (res == CUDA_SUCCESS && g_limit_bytes > 0) {
