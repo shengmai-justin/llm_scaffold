@@ -310,7 +310,7 @@ Wraps `planner.py` for RL mode: uses `generate_with_logprobs` instead of the Ope
 
 | Function | Description |
 |---|---|
-| `compute_reward(val_bpb, status)` | `-val_bpb` for success, `-1.0` for crash/edit_failed |
+| `compute_reward(val_bpb, status)` | `1/val_bpb` for success (~1.01), `0.0` for crash/edit_failed. TTT-Discover pattern for minimization. |
 | `compute_entropic_advantages(rewards)` | LOO entropic advantages with adaptive beta (binary search for beta s.t. KL ~ log(2)) |
 | `train_step(model, optimizer, rollouts, advantages, kl_coef, temperature, max_grad_norm)` | One policy gradient step: importance-weighted loss with per-token KL penalty, gradient accumulation across rollouts |
 
@@ -375,7 +375,13 @@ PUCTSampler methods:
 
 1. **Ratio explosion at step 0** (ratio_max=93) — `generate_with_logprobs` extracted `old_logprobs` from `model.generate()` (autoregressive, one token at a time), but training computed `new_logprobs` via `compute_response_logprobs` (KV-cache split, parallel forward). In bfloat16+SDPA, these paths produce slightly different floats. On rare low-probability tokens, `exp(new - old)` amplified the difference exponentially (e.g., logprob diff of 4.5 → ratio=93). Since our pipeline is on-policy (same weights for generation and training), the ratio should be exactly 1.0. **Fix:** recompute `old_logprobs` via `compute_response_logprobs` after generation, ensuring both paths are identical. One extra no-grad forward pass per rollout.
 
-2. **results.tsv always showed "keep"** — RL/ERL set `status="keep"` for any successful run, not just improvements. **Fix:** compare `val_bpb` against `best_bpb` when logging to results.tsv/rollouts.jsonl; rollout's internal `.status` unchanged (training uses reward, not status).
+2. **results.tsv always showed "keep"** — RL/ERL set `status="keep"` for any successful run, not just improvements. **Fix:** compare `val_bpb` against pre-update `best_bpb` when logging to results.tsv/rollouts.jsonl; rollout's internal `.status` unchanged (training uses reward, not status).
+
+3. **Reward scale mismatch** (avg_loss=-529 billion) — `reward = -val_bpb` clustered all rewards around -1.0, so crash (-1.0) and success (-0.99) were nearly indistinguishable. Entropic beta pushed to 1e6 trying to distinguish 0.01 differences, causing advantages and loss to explode. **Fix:** `reward = 1/val_bpb` for success, `0.0` for crash — matches TTT-Discover's pattern for minimization tasks (erdos_min_overlap). Crash-to-success gap now ~1.0.
+
+4. **Shared file conflicts** — `results.tsv`, `run.log`, and `eval_worker_*` dirs were shared between RL and ERL pipelines. **Fix:** `results.tsv` and `run.log` now written to per-pipeline log dirs. Worker dirs prefixed with repo name (`autoresearch_rl_worker_*` vs `autoresearch_erl_worker_*`). ERL uses separate repo copy (`autoresearch_erl/`).
+
+5. **Ray PYTHONPATH for ERL** — Ray workers couldn't find `rl_eval` module when ERL runs from `erl_pipeline/` directory. **Fix:** set `PYTHONPATH` to `rl_pipeline/` via Ray `runtime_env`.
 
 ---
 

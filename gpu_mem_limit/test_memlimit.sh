@@ -30,6 +30,11 @@ echo "=== Symbol check ==="
 nm -D libgpumemlimit.so | grep -E 'cuda(Malloc|Free|MemGetInfo)' || { echo "FAIL: missing symbols"; exit 1; }
 echo "OK"
 
+echo ""
+echo "=== Driver API symbol check ==="
+nm -D libgpumemlimit.so | grep -E 'cuMem(Create|Release|Alloc_v2|Free_v2|GetInfo_v2)' || { echo "FAIL: missing driver API symbols"; exit 1; }
+echo "OK"
+
 # ── Test 1: Memory reporting is faked ────────────────────────
 echo ""
 echo "=== Test 1: Memory limit reporting ==="
@@ -57,9 +62,24 @@ except torch.cuda.OutOfMemoryError:
     print('PASS: correctly rejected allocation over 500MB limit')
 "
 
-# ── Test 3: Two processes sharing one GPU ────────────────────
+# ── Test 3: OOM with expandable_segments=True ──────────────
 echo ""
-echo "=== Test 3: Two processes on same GPU, each capped at 88GB ==="
+echo "=== Test 3: OOM with expandable_segments enabled ==="
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+GPU_MEM_LIMIT_MB=500 LD_PRELOAD="$LIB_PATH" python3 -c "
+import torch
+try:
+    # 200M floats = 800MB, should exceed 500MB limit
+    t = torch.zeros(200_000_000, device='cuda')
+    print('FAIL: should have OOMed')
+    exit(1)
+except torch.cuda.OutOfMemoryError:
+    print('PASS: correctly rejected allocation over 500MB limit (expandable_segments=True)')
+"
+
+# ── Test 4: Two processes sharing one GPU ────────────────────
+echo ""
+echo "=== Test 4: Two processes on same GPU, each capped at 88GB ==="
 
 CUDA_VISIBLE_DEVICES=0 GPU_MEM_LIMIT_MB=88000 LD_PRELOAD="$LIB_PATH" python3 -c "
 import torch, time, os

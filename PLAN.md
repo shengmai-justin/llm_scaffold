@@ -12,9 +12,9 @@ Three pipelines for automated train.py optimization, each a different baseline:
 
 ## RL Pipeline (TTT-Discover)
 
-### Status: Running on B200 (8 GPUs, 50 steps)
+### Status: Running on B200 (3 GPUs, 50 steps)
 
-Parallel mode tested and submitted. Model on GPU 0, 7 eval workers on GPUs 1-7, batch_size=7, 50 steps.
+Current run: model on GPU 0, 2 eval workers on GPUs 1-2, batch_size=4, 50 steps. Rewards use `1/val_bpb` (TTT-Discover style for minimization). Ratio fix deployed. best_bpb: 0.989 → 0.987 after 16 steps.
 
 ### Design
 
@@ -77,15 +77,20 @@ python rl_main.py \
 11. `torch_dtype` deprecated — changed to `dtype`
 12. Failed proposals not retried — retry up to `batch_size * 2`
 13. Ratio explosion (ratio_max=93 at step 0) — `old_logprobs` were extracted from `generate()` (autoregressive) but `new_logprobs` computed via KV-cache split forward pass. bfloat16+SDPA numerical divergence on rare tokens caused `exp(new-old)` to blow up. Fixed: recompute `old_logprobs` via `compute_response_logprobs()` (same path as training) so ratio=1.0 exactly for on-policy updates.
-14. results.tsv status always "keep" — RL/ERL logged `status="keep"` for every successful run regardless of improvement. Fixed: compare against `best_bpb` to set `keep`/`discard` in logs.
+14. results.tsv status always "keep" — RL/ERL logged `status="keep"` for every successful run regardless of improvement. Fixed: compare against `best_bpb` (pre-update) to set `keep`/`discard` in logs.
+15. Reward scale mismatch — `reward = -val_bpb` clustered all rewards around -1.0 (crash=-1.0, success=-0.99). Entropic beta exploded to 1e6 trying to distinguish 0.01 differences → loss=-529 billion. Fixed: `reward = 1/val_bpb` for success, `0.0` for crash (TTT-Discover's pattern for minimization tasks). Crash-to-success gap now ~1.0.
+16. GPU tensor view leak — `new_ids` held a GPU view of `outputs.sequences` after `full_ids` moved to CPU. Fixed: `.cpu()` before slicing.
+17. `log_status` unbound on retry — sequential mode could reference `log_status` before assignment. Fixed: moved assignment outside conditional.
+18. Ray PYTHONPATH for ERL — Ray workers couldn't find `rl_eval` module when ERL runs from `erl_pipeline/` dir. Fixed: set `PYTHONPATH` via `runtime_env`.
+19. Shared file conflicts — `results.tsv`, `run.log`, and `eval_worker_*` dirs were shared between RL/ERL. Fixed: per-pipeline log dirs and repo-name-prefixed worker dirs.
 
 ---
 
 ## ERL Pipeline (Experiential RL)
 
-### Status: Code Complete, Pending GPU Test
+### Status: Running on B200 (3 GPUs, 50 steps)
 
-All files written and compile-checked. Feedback logic tested. Not yet run on GPU. Next step: 2-GPU smoke test, then full 8-GPU run.
+Smoke tested and running. Model on GPU 0, 2 eval workers on GPUs 1-2, batch_size=4, 50 steps. best_bpb: 0.989 → 0.987 after 8 steps. Reflection + distillation active.
 
 ### Design (arXiv:2602.13949 adaptation)
 
@@ -129,6 +134,10 @@ erl_pipeline/
 ├── erl_reflect.py      ← one reflection per step, logprobs for training
 ├── erl_types.py        ← Episode + StepReflection dataclasses
 ├── run_erl.sh          ← SLURM 8-GPU launch script
+├── run_erl_4gpu.sh     ← SLURM 3-GPU launch script (batch_size=4)
+├── clean.sh            ← cleanup script (autoresearch_erl, workers, logs)
+├── mock_erl_test.py    ← logic tests (no GPU)
+├── smoke_test_erl.py   ← GPU smoke test (1 GPU)
 └── (reuses rl_model.py, rl_eval.py, rl_planner.py, rl_types.py from rl_pipeline)
 ```
 
@@ -136,9 +145,9 @@ erl_pipeline/
 
 ```bash
 python erl_main.py \
-    --model-dir Qwen/Qwen3.5-9B --repo-path ./autoresearch_rl \
-    --model-gpu 0 --eval-gpus 1,2,3,4,5,6,7 --workers-per-gpu 1 \
-    --batch-size 7 --num-steps 50 \
+    --model-dir Qwen/Qwen3.5-9B --repo-path ./autoresearch_erl \
+    --model-gpu 0 --eval-gpus 1,2 --workers-per-gpu 1 \
+    --batch-size 4 --num-steps 50 \
     --lr 4e-5 --kl-coef 0.1 \
     --lora-rank 32 --lora-alpha 64 \
     --temperature 0.7 --max-new-tokens 8192 \
@@ -152,6 +161,7 @@ python erl_main.py \
 3. Resume left `step_log` undefined when `step_log.json` missing — added `step_log = []`
 4. `build_distill_ids` used updated `best_val_bpb` — temporarily restore pre-step value
 5. Reflection advantage baseline used filtered rollout list — changed to all episode rewards
+6. Ray PYTHONPATH — workers couldn't find `rl_eval` module. Fixed: set `PYTHONPATH` in `runtime_env`.
 
 ---
 
@@ -177,11 +187,44 @@ LD_PRELOAD library to cap per-process GPU memory (mimics MIG). Written, not yet 
 
 ---
 
+## Isolation
+
+RL and ERL pipelines are fully isolated and can run simultaneously:
+
+| | RL | ERL |
+|---|---|---|
+| Repo copy | `autoresearch_rl/` | `autoresearch_erl/` |
+| Workers | `autoresearch_rl_worker_*/` | `autoresearch_erl_worker_*/` |
+| Logs | `rl_pipeline/rl_log/` | `erl_pipeline/erl_log/` |
+| Results | `rl_pipeline/rl_log/results.tsv` | `erl_pipeline/erl_log/results.tsv` |
+| Run log | `rl_pipeline/rl_log/run.log` | `erl_pipeline/erl_log/run.log` |
+| Clean | `bash rl_pipeline/clean.sh` | `bash erl_pipeline/clean.sh` |
+
+## Reward Design
+
+Follows TTT-Discover's pattern for minimization tasks (erdos_min_overlap):
+- `reward = 1/val_bpb` for success (~1.01, higher is better)
+- `reward = 0.0` for crash/edit_failed
+- Crash-to-success gap: ~1.0 (vs 0.01 with old `-val_bpb`)
+- Entropic beta stays reasonable with this spread
+
+## Early Results (3 GPUs, batch_size=4)
+
+| | RL | ERL |
+|---|---|---|
+| Steps | 16 | 8 |
+| Total evals | ~64 | ~64 |
+| best_bpb | 0.989 → 0.987 | 0.989 → 0.987 |
+| Step time | ~13 min | ~23 min |
+| avg_loss | -0.9 to -1.9 | -0.08 to 0.3 |
+| ratio_max | 1.0 | 1.0 |
+| Distilled | N/A | 1 (step 1) |
+
 ## Next Steps
 
-1. **Check RL pipeline results** — 50-step run submitted, check `rl_log/step_log.json`
-2. **Smoke test ERL** — 2 GPUs, 3 steps, batch_size=2
-3. **Full ERL run** — `sbatch erl_pipeline/run_erl.sh`
-4. **Compare RL vs ERL** — same model, same steps, compare best_bpb curves
-5. **gpu_mem_limit testing** — run `test_memlimit.sh` on cluster, then integrate into run scripts for multi-worker-per-GPU
-6. **Structured reflection template** — refine `REFLECTION_SYSTEM` prompt with domain-specific structure (currently placeholder)
+1. **Monitor current runs** — both pipelines running 50 steps on 3 GPUs
+2. **Compare RL vs ERL** — same model, same total evals, compare best_bpb curves
+3. **Analyze ERL reflection value** — how often does attempt2 beat attempt1?
+4. **Scale up** — if results look good, run with 8 GPUs, batch_size=7
+5. **gpu_mem_limit testing** — run `test_memlimit.sh` on cluster for multi-worker-per-GPU
+6. **Structured reflection template** — refine `REFLECTION_SYSTEM` prompt with domain-specific structure
