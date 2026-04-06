@@ -40,8 +40,10 @@ def parse_metrics_from_output(output: str) -> tuple[float | None, int | None]:
 class EvalWorker:
     """Each worker owns an isolated repo copy and a GPU."""
 
-    def __init__(self, gpu_id: int, base_repo: str, worker_id: int):
+    def __init__(self, gpu_id: int, base_repo: str, worker_id: int,
+                 gpu_mem_limit_mb: int = 0):
         self.gpu_id = gpu_id
+        self.gpu_mem_limit_mb = gpu_mem_limit_mb
         self.repo_path = create_worker_repo(base_repo, worker_id)
 
     def evaluate(self, parent_code: str, edited_code: str, step: int) -> dict:
@@ -55,6 +57,16 @@ class EvalWorker:
             # Run train.py on assigned GPU
             env = os.environ.copy()
             env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
+            if self.gpu_mem_limit_mb > 0:
+                env["GPU_MEM_LIMIT_MB"] = str(self.gpu_mem_limit_mb)
+                lib = os.path.abspath(os.path.join(
+                    os.path.dirname(__file__),
+                    "..", "gpu_mem_limit", "libgpumemlimit.so"))
+                if not os.path.exists(lib):
+                    raise FileNotFoundError(
+                        f"gpu_mem_limit not compiled: {lib}\n"
+                        f"Run: make -C {os.path.dirname(lib)}")
+                env["LD_PRELOAD"] = lib
             try:
                 r = subprocess.run(
                     ["uv", "run", "train.py"],

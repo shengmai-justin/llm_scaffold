@@ -215,6 +215,8 @@ def main():
     parser.add_argument("--attn-impl", default="sdpa")
     parser.add_argument("--log-dir", default=os.path.join(PIPELINE_DIR, "erl_log"))
     parser.add_argument("--resume-step", type=int, default=None)
+    parser.add_argument("--gpu-mem-limit-mb", type=int, default=0,
+                        help="Per-worker GPU memory cap in MB (0=disabled, e.g. 88000 for B200 2-per-GPU)")
     args = parser.parse_args()
 
     repo_path = os.path.abspath(args.repo_path)
@@ -245,7 +247,8 @@ def main():
         from rl_eval import EvalWorker
         eval_gpu_ids = [int(g) for g in args.eval_gpus.split(",")]
         expanded = [g for g in eval_gpu_ids for _ in range(args.workers_per_gpu)]
-        workers = [EvalWorker.remote(gpu, repo_path, i) for i, gpu in enumerate(expanded)]
+        workers = [EvalWorker.remote(gpu, repo_path, i, args.gpu_mem_limit_mb)
+                   for i, gpu in enumerate(expanded)]
         print(f"Parallel mode: model GPU {args.model_gpu}, eval GPUs {eval_gpu_ids}")
 
     # Load model

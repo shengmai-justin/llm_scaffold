@@ -307,6 +307,8 @@ def main():
                         help="sdpa (default), flash_attention_2, or flash_attention_4")
     parser.add_argument("--log-dir", default=os.path.join(PIPELINE_DIR, "rl_log"))
     parser.add_argument("--resume-step", type=int, default=None)
+    parser.add_argument("--gpu-mem-limit-mb", type=int, default=0,
+                        help="Per-worker GPU memory cap in MB (0=disabled, e.g. 88000 for B200 2-per-GPU)")
     args = parser.parse_args()
 
     repo_path = os.path.abspath(args.repo_path)
@@ -344,7 +346,7 @@ def main():
             print(f"WARNING: model GPU {model_gpu} also in eval GPUs, will contend for memory")
         expanded_gpu_ids = [g for g in eval_gpu_ids for _ in range(args.workers_per_gpu)]
         workers = [
-            EvalWorker.remote(gpu, repo_path, i)
+            EvalWorker.remote(gpu, repo_path, i, args.gpu_mem_limit_mb)
             for i, gpu in enumerate(expanded_gpu_ids)
         ]
         print(f"Parallel mode: model on GPU {model_gpu}, "
