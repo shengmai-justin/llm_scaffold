@@ -183,7 +183,7 @@ python erl_main.py \
 - `rl_types.py` — Rollout dataclass
 
 ### gpu_mem_limit/
-LD_PRELOAD library to cap per-process GPU memory (mimics MIG). Written, not yet tested on cluster.
+LD_PRELOAD library to cap per-process GPU memory. Intercepts both CUDA runtime API (`cudaMalloc`) and driver API (`cuMemCreate`) for PyTorch 2.x + CUDA 12.x compatibility. Tested on cluster, integrated into both pipelines via `--gpu-mem-limit-mb` flag.
 
 ---
 
@@ -220,11 +220,14 @@ Follows TTT-Discover's pattern for minimization tasks (erdos_min_overlap):
 | ratio_max | 1.0 | 1.0 |
 | Distilled | N/A | 1 (step 1) |
 
+## Current Runs (5 GPUs, batch_size=8, 2 workers/GPU)
+
+Both pipelines running 100 steps with gpu_mem_limit (88GB/worker):
+- `sbatch rl_pipeline/run_rl_4gpu_memlimit.sh` — 5 GPUs, 3-day limit
+- `sbatch erl_pipeline/run_erl_4gpu_memlimit.sh` — 5 GPUs, 3-day limit
+
 ## Next Steps
 
-1. **Monitor current runs** — both pipelines running 50 steps on 3 GPUs
-2. **Compare RL vs ERL** — same model, same total evals, compare best_bpb curves
-3. **Analyze ERL reflection value** — how often does attempt2 beat attempt1?
-4. **Scale up** — if results look good, run with 8 GPUs, batch_size=7
-5. **gpu_mem_limit testing** — run `test_memlimit.sh` on cluster for multi-worker-per-GPU
-6. **Structured reflection template** — refine `REFLECTION_SYSTEM` prompt with domain-specific structure
+1. **Monitor 100-step runs** — check best_bpb curves, compare RL vs ERL at scale
+2. **Analyze ERL reflection value** — how often does attempt2 beat attempt1?
+3. **Structured reflection template** — refine `REFLECTION_SYSTEM` prompt with domain-specific structure

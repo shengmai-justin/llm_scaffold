@@ -48,9 +48,10 @@ llm_scaffold/
 │   └── mps.md           — multi-GPU parallelization plan
 │
 └── gpu_mem_limit/
-    ├── gpu_mem_limit.c  — LD_PRELOAD lib to cap per-process GPU memory
-    ├── Makefile         — compile with GCC, links -ldl -lpthread
-    └── test_memlimit.sh — test suite (memory reporting, OOM, two-process sharing)
+    ├── gpu_mem_limit.c    — LD_PRELOAD lib (runtime + driver API interception)
+    ├── Makefile           — compile with GCC, links -ldl -lpthread
+    ├── test_memlimit.sh   — unit tests (symbols, OOM, expandable segments, two-process)
+    └── test_dual_train.sh — real-world test (two train.py on same GPU)
 ```
 
 ---
@@ -389,13 +390,17 @@ PUCTSampler methods:
 
 `LD_PRELOAD` library to enforce per-process GPU memory limits. Needed for running 2 train.py workers per B200 GPU (each uses ~74GB, B200 has 180GB).
 
-Intercepts CUDA runtime API calls (`cudaMalloc`, `cudaFree`, `cudaMemGetInfo`, and async variants) to cap each process at `GPU_MEM_LIMIT_MB` megabytes.
+Intercepts both CUDA runtime API (`cudaMalloc`, `cudaFree`, `cudaMemGetInfo`, async variants) and driver API (`cuMemCreate`, `cuMemRelease`, `cuMemAlloc_v2`, `cuMemFree_v2`, `cuMemGetInfo_v2`). Driver API interception is required for PyTorch 2.x + CUDA 12.x which uses expandable segments (`cuMemCreate`) by default.
 
 ```bash
+# Standalone usage
 GPU_MEM_LIMIT_MB=88000 LD_PRELOAD=./libgpumemlimit.so python train.py
+
+# Integrated into pipelines (auto-injected by EvalWorker when flag is set)
+python rl_main.py --workers-per-gpu 2 --gpu-mem-limit-mb 88000 ...
 ```
 
-Tracks allocations in a fixed-size array (64K entries). Thread-safe via `pthread_mutex`. Fakes `cudaMemGetInfo` to report the limit as total memory.
+Tracks allocations in an open-addressing hash table (O(1) lookup). Thread-safe via `pthread_mutex`. Uses `dlopen("libcuda.so.1", RTLD_NOLOAD)` to resolve driver API symbols (RTLD_NEXT doesn't work because libcuda.so is dlopen'd by the runtime). Includes a thread-local recursion guard to prevent double-counting if runtime API internally dispatches to driver API.
 
 ---
 
