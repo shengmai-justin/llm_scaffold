@@ -35,9 +35,6 @@ if [ ! -d "$REPO_PATH" ]; then
     cp -r "$SOURCE_REPO" "$REPO_PATH"
 fi
 
-# Ensure frozen copy has latest from source (e.g. after git pull)
-rsync -a --exclude='.git' "$SOURCE_REPO/" "$REPO_PATH/"
-
 # ── Load modules ──────────────────────────────────────────────
 module load gcc/14.2.0
 module load cuda/12.8.1
@@ -61,7 +58,14 @@ echo "---"
 
 # ── Install deps ──────────────────────────────────────────────
 pip install openai "sglang[all]" --upgrade --quiet
+
+# Sync source repo first (compiles kernels with gcc/cuda loaded)
 cd "$SOURCE_REPO" && uv sync && cd "$SCAFFOLD_DIR"
+
+# Sync frozen copy from source (exclude .git and .venv)
+rsync -a --exclude='.git' --exclude='.venv' "$SOURCE_REPO/" "$REPO_PATH/"
+
+# Build frozen copy's own venv
 cd "$REPO_PATH" && uv sync && cd "$SCAFFOLD_DIR"
 
 # ── Start SGLang server ──────────────────────────────────────
