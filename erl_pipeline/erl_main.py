@@ -371,7 +371,6 @@ def main():
 
         ref_text, ref_ids, ref_lp, ref_plen = generate_batch_reflection(
             model, tokenizer,
-            train_py=best_code,
             batch_feedback=batch_feedback,
             best_val_bpb=best_bpb,
             temperature=args.temperature,

@@ -244,8 +244,15 @@ def main():
     parser.add_argument("--max-experiments", type=int, default=100)
     parser.add_argument("--llm-base-url", default="http://localhost:8000/v1")
     parser.add_argument("--llm-model", default="Qwen/Qwen3.5-9B")
+    parser.add_argument("--log-dir", default=None, help="Directory for results.tsv, run.log, state.json")
     parser.add_argument("--resume", action="store_true", help="Resume from state.json")
     args = parser.parse_args()
+
+    if args.log_dir:
+        os.makedirs(args.log_dir, exist_ok=True)
+        results.RESULTS_FILE = os.path.join(args.log_dir, "results.tsv")
+        results.RUN_LOG = os.path.join(args.log_dir, "run.log")
+        state.STATE_FILE = os.path.join(args.log_dir, "state.json")
 
     if args.resume and os.path.exists(state.STATE_FILE):
         print("Resuming from state.json")

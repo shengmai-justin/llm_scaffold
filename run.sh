@@ -16,7 +16,8 @@ MAX_MODEL_LEN=30000
 PROJ_DIR="/blue/buyuheng/li_an.ucsb/proj_yepeng"
 CONDA_ENV="${PROJ_DIR}/envs/myenv"
 SCAFFOLD_DIR="${PROJ_DIR}/llm_scaffold"
-REPO_PATH="${SCAFFOLD_DIR}/autoresearch"
+REPO_PATH="${SCAFFOLD_DIR}/autoresearch_frozen"
+LOG_DIR="${SCAFFOLD_DIR}/frozen_log"
 
 # ── Navigate to project dir ───────────────────────────────────
 cd "$SCAFFOLD_DIR"
@@ -110,6 +111,7 @@ fi
 echo "Starting experiment loop..."
 python main.py \
     --repo-path "$REPO_PATH" \
+    --log-dir "$LOG_DIR" \
     --max-experiments "$MAX_EXPERIMENTS" \
     --llm-base-url "http://localhost:$VLLM_PORT/v1" \
     --llm-model "$MODEL" \

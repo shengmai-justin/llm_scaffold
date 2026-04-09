@@ -101,7 +101,22 @@ All pipelines run on HiPerGator B200 nodes.
 | Time limit | 10 days | 4 days |
 | Submit | `sbatch rl_pipeline/run_rl.sh` | `sbatch erl_pipeline/run_erl.sh` |
 
-### Memory-limited (2 workers per GPU)
+### Memory-limited production (5 GPUs, 2 workers/GPU)
+
+| | RL | ERL |
+|---|---|---|
+| Script | `rl_pipeline/run_rl_4gpu_memlimit.sh` | `erl_pipeline/run_erl_4gpu_memlimit.sh` |
+| SBATCH GPUs | 5 | 5 |
+| Model GPU | 0 | 0 |
+| Eval GPUs | 1,2,3,4 | 1,2,3,4 |
+| Workers/GPU | 2 | 2 |
+| GPU mem limit | 88000 MB per worker | 88000 MB per worker |
+| Batch size | 8 | 8 |
+| Steps | 100 | 100 |
+| Time limit | 3 days | 3 days |
+| Submit | `sbatch rl_pipeline/run_rl_4gpu_memlimit.sh` | `sbatch erl_pipeline/run_erl_4gpu_memlimit.sh` |
+
+### Memory-limited test (3 GPUs, quick validation)
 
 | | RL (test) |
 |---|---|

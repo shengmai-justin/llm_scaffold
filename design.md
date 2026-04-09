@@ -34,18 +34,35 @@ llm_scaffold/
 ├── run.log          — latest training output (generated at runtime)
 │
 ├── rl_pipeline/
-│   ├── rl_main.py       — RL entry point, sequential + parallel (Ray) modes
-│   ├── rl_model.py      — HF model + PEFT LoRA + SDPA + gradient checkpointing
-│   ├── rl_planner.py    — wraps planner.py, local generation, strips <think> tags
-│   ├── rl_trainer.py    — entropic advantages, per-token KL penalty, policy gradient
-│   ├── rl_sampler.py    — PUCT tree search (State stores code, not git commits)
-│   ├── rl_eval.py       — Ray EvalWorker for parallel train.py evaluation
-│   ├── rl_types.py      — Rollout dataclass
-│   ├── run_rl.sh        — SLURM launch script (8 GPUs, no SGLang)
-│   ├── smoke_test.py    — GPU smoke test (8 components)
-│   ├── debug_generate.py — debug: generate one proposal, print raw output
-│   ├── mock_rl_test.py  — mock RL loop test (no GPU needed)
-│   └── mps.md           — multi-GPU parallelization plan
+│   ├── rl_main.py              — RL entry point, sequential + parallel (Ray) modes
+│   ├── rl_model.py             — HF model + PEFT LoRA + SDPA + gradient checkpointing
+│   ├── rl_planner.py           — wraps planner.py, local generation, strips <think> tags
+│   ├── rl_trainer.py           — entropic advantages, per-token KL penalty, policy gradient
+│   ├── rl_sampler.py           — PUCT tree search (State stores code, not git commits)
+│   ├── rl_eval.py              — Ray EvalWorker (supports --gpu-mem-limit-mb)
+│   ├── rl_types.py             — Rollout dataclass
+│   ├── run_rl.sh               — SLURM 8-GPU (1 worker/GPU)
+│   ├── run_rl_4gpu.sh          — SLURM 3-GPU (1 worker/GPU, batch=4)
+│   ├── run_rl_4gpu_memlimit.sh — SLURM 5-GPU (2 workers/GPU, 88GB cap, batch=8)
+│   ├── run_rl_memlimit_test.sh — SLURM 3-GPU memlimit test (3 steps)
+│   ├── smoke_test.py           — GPU smoke test (8 components)
+│   ├── debug_generate.py       — debug: generate one proposal, print raw output
+│   ├── mock_rl_test.py         — mock RL loop test (no GPU needed)
+│   └── mps.md                  — multi-GPU parallelization plan
+│
+├── erl_pipeline/
+│   ├── erl_main.py              — phased loop: attempt1 → reflect → attempt2 → train
+│   ├── erl_trainer.py           — GRPO advantages, 4 training signals
+│   ├── erl_feedback.py          — batch-level structured feedback
+│   ├── erl_reflect.py           — one reflection per step, shared by all attempt2s
+│   ├── erl_types.py             — Episode + StepReflection dataclasses
+│   ├── run_erl.sh               — SLURM 8-GPU (1 worker/GPU)
+│   ├── run_erl_4gpu.sh          — SLURM 3-GPU (1 worker/GPU, batch=4)
+│   ├── run_erl_4gpu_memlimit.sh — SLURM 5-GPU (2 workers/GPU, 88GB cap, batch=8)
+│   ├── clean.sh                 — cleanup script
+│   ├── mock_erl_test.py         — logic tests (no GPU)
+│   ├── smoke_test_erl.py        — GPU smoke test (1 GPU)
+│   └── (reuses rl_model.py, rl_eval.py, rl_planner.py, rl_types.py)
 │
 └── gpu_mem_limit/
     ├── gpu_mem_limit.c    — LD_PRELOAD lib (runtime + driver API interception)
@@ -578,3 +595,28 @@ See `rl_types.py` section above.
 | `gpu_mem_limit/` | Per-process GPU memory capping via LD_PRELOAD |
 
 The LLM decides *what to try*. The harness decides *everything else*. In RL mode, the LLM *learns from scalar rewards*. In ERL mode, the LLM *reflects on batch results and internalizes corrections*.
+
+---
+
+## TODO: Duplicate Experiment Rejection
+
+**Problem:** The model re-proposes the same edit that was already tried and discarded.
+
+**Solution:** Harness-level rejection sampling on the `(search, replace)` pair. No extra tokens in the prompt.
+
+```python
+def is_duplicate(proposal, history):
+    for past in history:
+        if (past["search"] == edit["search"] and
+            past["replace"] == edit["replace"]):
+            return True
+    return False
+```
+
+**Flow:**
+1. Model proposes
+2. Harness checks each edit in proposal against all past edits
+3. If duplicate → log, resample (up to 3 retries)
+4. If all 3 are duplicates → accept last one (avoid infinite loop)
+
+**Storage:** Append each proposal's edits to `edits_history.jsonl` (one JSON object per experiment with `search` and `replace` fields).

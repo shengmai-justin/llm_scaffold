@@ -12,9 +12,9 @@ Three pipelines for automated train.py optimization, each a different baseline:
 
 ## RL Pipeline (TTT-Discover)
 
-### Status: Running on B200 (3 GPUs, 50 steps)
+### Status: Running on B200 (5 GPUs, 100 steps, 2 workers/GPU with gpu_mem_limit)
 
-Current run: model on GPU 0, 2 eval workers on GPUs 1-2, batch_size=4, 50 steps. Rewards use `1/val_bpb` (TTT-Discover style for minimization). Ratio fix deployed. best_bpb: 0.989 → 0.987 after 16 steps.
+Current run: model on GPU 0, 8 eval workers on GPUs 1-4 (2/GPU, 88GB cap), batch_size=8, 100 steps, 3-day limit. Previous run (3 GPUs, 50 steps): best_bpb 0.989 → 0.987 after 16 steps.
 
 ### Design
 
@@ -88,9 +88,9 @@ python rl_main.py \
 
 ## ERL Pipeline (Experiential RL)
 
-### Status: Running on B200 (3 GPUs, 50 steps)
+### Status: Running on B200 (5 GPUs, 100 steps, 2 workers/GPU with gpu_mem_limit)
 
-Smoke tested and running. Model on GPU 0, 2 eval workers on GPUs 1-2, batch_size=4, 50 steps. best_bpb: 0.989 → 0.987 after 8 steps. Reflection + distillation active.
+Current run: model on GPU 0, 8 eval workers on GPUs 1-4 (2/GPU, 88GB cap), batch_size=8, 100 steps, 3-day limit. Previous run (3 GPUs, 50 steps): best_bpb 0.989 → 0.987 after 8 steps. Reflection + distillation active.
 
 ### Design (arXiv:2602.13949 adaptation)
 

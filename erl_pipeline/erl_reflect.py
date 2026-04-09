@@ -35,7 +35,6 @@ Output plain text only. No JSON, no code fences."""
 def generate_batch_reflection(
     model,
     tokenizer,
-    train_py: str,
     batch_feedback: str,
     best_val_bpb: float,
     temperature: float = 0.7,
@@ -44,7 +43,6 @@ def generate_batch_reflection(
     """Generate one reflection for the entire batch of attempt1 results.
 
     Args:
-        train_py: current parent train.py code
         batch_feedback: output of build_batch_feedback() — all attempt1 results
         best_val_bpb: current best metric
 
@@ -52,8 +50,6 @@ def generate_batch_reflection(
         (reflection_text, full_ids, logprobs, prompt_len)
     """
     user_msg = (
-        f"Current train.py (first 200 lines):\n"
-        f"```python\n{_abbreviate(train_py, 200)}\n```\n\n"
         f"Current best val_bpb: {best_val_bpb:.6f}\n\n"
         f"{batch_feedback}\n\n"
         f"Analyze all attempts and produce your reflection."
@@ -94,11 +90,3 @@ def build_reflection_context(batch_feedback: str, reflection_text: str) -> str:
         f"{reflection_text}\n\n"
         f"Based on the batch results and your reflection, propose an improved experiment."
     )
-
-
-def _abbreviate(text: str, max_lines: int) -> str:
-    """Truncate text to max_lines for prompt efficiency."""
-    lines = text.split("\n")
-    if len(lines) <= max_lines:
-        return text
-    return "\n".join(lines[:max_lines]) + f"\n... ({len(lines) - max_lines} more lines)"
