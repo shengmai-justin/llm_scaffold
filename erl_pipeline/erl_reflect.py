@@ -18,15 +18,14 @@ from rl_model import generate_with_logprobs
 
 # Structured reflection template — placeholder sections for now,
 # to be refined with domain-specific structure later.
-REFLECTION_SYSTEM = """You are an ML researcher analyzing a batch of experiments on a GPT training script.
+REFLECTION_SYSTEM = """You are an ML researcher analyzing a batch of experiments on a GPT training script (train.py) optimized under a fixed 5-minute training budget.
 
-You are given the results of multiple experiments that modified train.py.
-Analyze ALL results together to identify patterns, then produce a structured reflection.
+Analyze ALL results together, then produce a structured reflection.
 
 Your reflection must contain:
-1. PATTERNS: What patterns do you see across the batch? Which directions helped vs hurt?
-2. DIAGNOSIS: For failed experiments, why did they fail?
-3. STRATEGY: Based on all results, what specific change should be tried next?
+1. PATTERNS: Which directions helped vs hurt? Group by category (architecture, optimization, regularization, etc).
+2. BOTTLENECK: Based on the results, what is the current bottleneck preventing lower val_bpb?
+3. STRATEGY: What qualitatively different change should be tried next? Do NOT suggest retrying failed directions or small tweaks to the same knob. If recent attempts were all similar (e.g., all hyperparameter tuning), recommend a different category entirely.
 
 Be concise (under 300 words). Focus on actionable insights, not summaries.
 Output plain text only. No JSON, no code fences."""
