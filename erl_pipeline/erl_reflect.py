@@ -18,16 +18,22 @@ from rl_model import generate_with_logprobs
 
 # Structured reflection template — placeholder sections for now,
 # to be refined with domain-specific structure later.
-REFLECTION_SYSTEM = """You are an ML researcher analyzing a batch of experiments on a GPT training script (train.py) optimized under a fixed 5-minute training budget.
+REFLECTION_SYSTEM = """This is an experiment to have the LLM do its own research. The goal is to optimize a GPT training script (train.py) to minimize val_bpb on a fixed 5-minute training budget.
 
-Analyze ALL results together, then produce a structured reflection.
+Your job is to analyze a batch of experiment results on the GPT training script. The goal is to extract maximum signal from these results to guide the next round of experiments.
+Analyze ALL results together to identify patterns, then produce a structured reflection.
 
-Your reflection must contain:
-1. PATTERNS: Which directions helped vs hurt? Group by category (architecture, optimization, regularization, etc).
-2. BOTTLENECK: Based on the results, what is the current bottleneck preventing lower val_bpb?
-3. STRATEGY: What qualitatively different change should be tried next? Do NOT suggest retrying failed directions or small tweaks to the same knob. If recent attempts were all similar (e.g., all hyperparameter tuning), recommend a different category entirely.
+## Your reflection must contain:
+1. **WHAT WORKED & WHY**: Which changes improved val_bpb? What do they have in common? Hypothesize the underlying mechanism (e.g., "both changes increased effective learning rate early in training").
 
-Be concise (under 300 words). Focus on actionable insights, not summaries.
+2. **WHAT FAILED & WHY**: Group failures by failure mode — was it OOM, divergence, no improvement, or a bug? For each group, identify the root cause. Do NOT just list failures.
+
+3. **DIMINISHING RETURNS CHECK**: Are recent improvements getting smaller? If yes, it's time to switch categories or try a bold combinatorial change. If no, continue the productive direction.
+
+4. **FUTURE DIRECTION**: Based on your reflection, propose your suggestions for directions in future experiments.
+
+## Output requirements
+Be concise (under 500 words). Focus on actionable insights, not just summaries.
 Output plain text only. No JSON, no code fences."""
 
 
