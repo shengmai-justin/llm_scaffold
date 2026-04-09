@@ -63,7 +63,7 @@ python erl_main.py \
     --lora-rank "$LORA_RANK" \
     --lora-alpha "$LORA_ALPHA" \
     --temperature 0.7 \
-    --max-new-tokens 8192 \
+    --max-new-tokens 16384 \
     --attn-impl sdpa \
     --log-dir ./erl_log
 

@@ -20,16 +20,23 @@ from rl_types import Rollout
 from erl_types import Episode, StepReflection
 
 
-def compute_grpo_advantages(rewards: list[float]) -> torch.Tensor:
+def compute_grpo_advantages(rewards: list[float], dr_grpo: bool = False) -> torch.Tensor:
     """GRPO advantages: normalized within the group.
 
-    advantage_i = (reward_i - mean(rewards)) / std(rewards)
-    Returns zeros if std is zero (all rewards identical).
+    Standard GRPO: advantage_i = (reward_i - mean(rewards)) / std(rewards)
+    Dr. GRPO:      advantage_i = reward_i - mean(rewards)  (no std normalization)
+
+    Returns zeros if all rewards identical.
     """
     r = torch.tensor(rewards, dtype=torch.float32)
     if len(r) < 2:
         return torch.zeros_like(r)
     mean = r.mean()
+    if dr_grpo:
+        adv = r - mean
+        if adv.abs().max() < 1e-8:
+            return torch.zeros_like(r)
+        return adv
     std = r.std()
     if std < 1e-8:
         return torch.zeros_like(r)
@@ -44,6 +51,7 @@ def erl_train_step(
     kl_coef: float = 0.1,
     temperature: float = 1.0,
     max_grad_norm: float = 1.0,
+    dr_grpo: bool = False,
 ) -> dict:
     """One ERL training step with four signals.
 
@@ -62,7 +70,7 @@ def erl_train_step(
     # --- Signal 1: Attempt1 rollouts (GRPO) ---
     a1_rollouts = [ep.attempt1_rollout for ep in episodes if ep.train_attempt1 and ep.attempt1_rollout.full_ids.numel() > 0]
     if len(a1_rollouts) >= 2:
-        a1_advs = compute_grpo_advantages([r.reward for r in a1_rollouts])
+        a1_advs = compute_grpo_advantages([r.reward for r in a1_rollouts], dr_grpo=dr_grpo)
         for rollout, adv in zip(a1_rollouts, a1_advs):
             if abs(adv.item()) < 1e-8:
                 continue
@@ -88,7 +96,7 @@ def erl_train_step(
     # --- Signal 3: Attempt2 rollouts (GRPO) ---
     a2_rollouts = [ep.attempt2_rollout for ep in episodes if ep.train_attempt2 and ep.attempt2_rollout is not None and ep.attempt2_rollout.full_ids.numel() > 0]
     if len(a2_rollouts) >= 2:
-        a2_advs = compute_grpo_advantages([r.reward for r in a2_rollouts])
+        a2_advs = compute_grpo_advantages([r.reward for r in a2_rollouts], dr_grpo=dr_grpo)
         for rollout, adv in zip(a2_rollouts, a2_advs):
             if abs(adv.item()) < 1e-8:
                 continue
