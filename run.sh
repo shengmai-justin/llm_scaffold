@@ -4,9 +4,9 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64gb
-#SBATCH --time=10-12:00:00
+#SBATCH --time=04:00:00
 #SBATCH --partition=hpg-b200
-#SBATCH --gpus=1
+#SBATCH --gpus=2
 
 # ── Configuration ─────────────────────────────────────────────
 MODEL="Qwen/Qwen3.5-9B"
@@ -54,8 +54,8 @@ pip install openai "sglang[all]" --upgrade --quiet
 cd "$REPO_PATH" && uv sync && cd "$SCAFFOLD_DIR"
 
 # ── Start SGLang server ──────────────────────────────────────
-echo "Starting SGLang server..."
-python -m sglang.launch_server \
+echo "Starting SGLang server on GPU 0..."
+CUDA_VISIBLE_DEVICES=0 python -m sglang.launch_server \
     --model-path "$MODEL" \
     --port "$VLLM_PORT" \
     --tp-size 1 \
@@ -108,8 +108,8 @@ if ! curl -s "http://localhost:$VLLM_PORT/health" > /dev/null 2>&1; then
 fi
 
 # ── Run experiments on GPU 1 ──────────────────────────────────
-echo "Starting experiment loop..."
-python main.py \
+echo "Starting experiment loop on GPU 1..."
+CUDA_VISIBLE_DEVICES=1 python main.py \
     --repo-path "$REPO_PATH" \
     --log-dir "$LOG_DIR" \
     --max-experiments "$MAX_EXPERIMENTS" \
