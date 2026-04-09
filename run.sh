@@ -16,16 +16,23 @@ MAX_MODEL_LEN=30000
 PROJ_DIR="/blue/buyuheng/li_an.ucsb/proj_yepeng"
 CONDA_ENV="${PROJ_DIR}/envs/myenv"
 SCAFFOLD_DIR="${PROJ_DIR}/llm_scaffold"
+SOURCE_REPO="${SCAFFOLD_DIR}/autoresearch"
 REPO_PATH="${SCAFFOLD_DIR}/autoresearch_frozen"
 LOG_DIR="${SCAFFOLD_DIR}/frozen_log"
 
 # ── Navigate to project dir ───────────────────────────────────
 cd "$SCAFFOLD_DIR"
 
-# ── Clone autoresearch if not present ─────────────────────────
-if [ ! -d "$REPO_PATH" ]; then
+# ── Clone source repo if not present ─────────────────────────
+if [ ! -d "$SOURCE_REPO" ]; then
     echo "Cloning autoresearch repo..."
-    git clone https://github.com/karpathy/autoresearch.git "$REPO_PATH"
+    git clone https://github.com/karpathy/autoresearch.git "$SOURCE_REPO"
+fi
+
+# ── Copy to frozen working directory ─────────────────────────
+if [ ! -d "$REPO_PATH" ]; then
+    echo "Copying autoresearch to frozen working dir..."
+    cp -r "$SOURCE_REPO" "$REPO_PATH"
 fi
 
 # ── Load modules ──────────────────────────────────────────────
@@ -88,7 +95,7 @@ trap cleanup EXIT
 
 # Wait for server to be ready
 echo "Waiting for server to be ready..."
-for i in $(seq 1 180); do
+for i in $(seq 1 360); do
     if curl -s "http://localhost:$VLLM_PORT/health" > /dev/null 2>&1; then
         echo "Server ready after ${i}s"
         break
@@ -102,7 +109,7 @@ for i in $(seq 1 180); do
 done
 
 if ! curl -s "http://localhost:$VLLM_PORT/health" > /dev/null 2>&1; then
-    echo "ERROR: Server failed to start within 180s"
+    echo "ERROR: Server failed to start within 360s"
     tail -20 sglang_server.log
     exit 1
 fi
