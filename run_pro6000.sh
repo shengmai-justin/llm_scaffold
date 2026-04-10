@@ -138,6 +138,14 @@ if [ -z "${CUDA_HOME:-}" ] || [ ! -x "$CUDA_HOME/bin/nvcc" ]; then
 fi
 export PATH="$CUDA_HOME/bin:$PATH"
 export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+# Triton JIT-compiles a C helper that links against -lcuda.  The
+# NVIDIA driver only ships libcuda.so.1 (versioned), so gcc's linker
+# can't find an unversioned libcuda.so.  The CUDA toolkit provides a
+# stub at $CUDA_HOME/lib64/stubs/libcuda.so for this exact case.
+# LIBRARY_PATH is the link-time search path (not LD_LIBRARY_PATH).
+if [ -f "$CUDA_HOME/lib64/stubs/libcuda.so" ]; then
+    export LIBRARY_PATH="$CUDA_HOME/lib64/stubs:${LIBRARY_PATH:-}"
+fi
 echo "CUDA_HOME: $CUDA_HOME ($(nvcc --version | grep -oE 'release [0-9.]+' | head -1))"
 
 # ── Info ─────────────────────────────────────────────────────
