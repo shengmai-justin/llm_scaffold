@@ -4,15 +4,15 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=100gb
-#SBATCH --time=3-00:00:00
+#SBATCH --time=12:00:00
 #SBATCH --partition=hpg-b200
-#SBATCH --gpus=5
+#SBATCH --gpus=3
 
 # ── Configuration ─────────────────────────────────────────────
 MODEL="Qwen/Qwen3.5-9B"
 NUM_STEPS=100
 MODEL_GPU=0
-EVAL_GPUS="1,2,3,4"
+EVAL_GPUS="1,2"
 BATCH_SIZE=8
 WORKERS_PER_GPU=2
 GPU_MEM_LIMIT_MB=88000
@@ -46,8 +46,8 @@ echo "Job ID:    $SLURM_JOB_ID"
 echo "Node:      $(hostname)"
 echo "GPUs:      $(nvidia-smi -L 2>/dev/null | wc -l)"
 echo "Model:     $MODEL"
-echo "Mode:      RL 5-GPU memlimit (model=GPU0, eval=GPU1-4, 2 workers/GPU, 88GB cap)"
-echo "Workers:   ${WORKERS_PER_GPU}/GPU x 4 eval GPUs = 8 workers, batch_size=${BATCH_SIZE}"
+echo "Mode:      RL 3-GPU memlimit (model=GPU0, eval=GPU1-2, 2 workers/GPU, 88GB cap)"
+echo "Workers:   ${WORKERS_PER_GPU}/GPU x 2 eval GPUs = 4 workers, batch_size=${BATCH_SIZE}"
 echo "Started:   $(date)"
 echo "---"
 
