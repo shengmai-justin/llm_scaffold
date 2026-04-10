@@ -45,7 +45,14 @@ echo "Started:   $(date)"
 echo "---"
 
 # ── Install deps ──────────────────────────────────────────────
-pip install openai "sglang[all]" --upgrade --quiet
+pip install --quiet \
+    openai \
+    "sglang[all]==0.5.10.post1" \
+    "flash-attn-4==4.0.0b4" \
+    "torch==2.9.1" \
+    "torchvision==0.24.1" \
+    "torchaudio==2.9.1" \
+    "cuda-python==12.9"
 
 # Sync source repo (main.py copies source → frozen working dir)
 cd "$SOURCE_REPO" && uv sync && cd "$SCAFFOLD_DIR"

@@ -6,14 +6,24 @@ Built on top of [karpathy/autoresearch](https://github.com/karpathy/autoresearch
 
 ## Architecture
 
+Three pipelines sharing a common base.
+
+**Frozen pipeline** (uses any OpenAI-compatible API):
 ```
 main.py      — orchestration, setup, experiment loop, recovery
 state.py     — persistent state (state.json), git operations, file I/O
 planner.py   — LLM context assembly, proposal, search/replace editing
 results.py   — execution, log parsing, result logging, keep/discard decision
 prompt.md    — system prompt for the LLM (editable without touching code)
-run.sh       — Slurm sbatch script (SGLang + training on single B200)
+run.sh       — Slurm sbatch script (SGLang + training on 2x B200)
+clean.sh     — wipe frozen working dir + logs
 ```
+
+**RL pipeline** (`rl_pipeline/`, TTT-Discover style with PUCT tree search and entropic LOO advantages)
+
+**ERL pipeline** (`erl_pipeline/`, Experiential RL — phased loop with one reflection per step, GRPO + RAFT distillation)
+
+All three pipelines copy the source `autoresearch/` repo into their own working directory (`autoresearch_frozen/`, `autoresearch_rl/`, `autoresearch_erl/`) via `shutil.copytree`.
 
 ## Setup
 
@@ -140,7 +150,9 @@ Edit `prompt.md` to change the system prompt sent to the LLM — no code changes
 CLI flags for `main.py`:
 
 ```
---repo-path        Path to autoresearch repo (default: ./autoresearch)
+--repo-path        Working repo path (default: ./autoresearch_frozen)
+--source-repo      Source repo to copy from on first run (default: ./autoresearch)
+--log-dir          Directory for results.tsv, run.log, state.json (default: scaffold root)
 --max-experiments  Max iterations (default: 100, 0 = unlimited)
 --llm-base-url     OpenAI-compatible endpoint (default: http://localhost:8000/v1)
 --llm-model        Model name (default: Qwen/Qwen3.5-9B)
