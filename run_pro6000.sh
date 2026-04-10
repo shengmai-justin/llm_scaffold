@@ -91,12 +91,13 @@ fi
 source "$VENV_DIR/bin/activate"
 
 # ── Install pinned dependencies (Pro 6000 frozen stack) ──────
-# NOTE: no flash-attn-4 and no `kernels` package. SGLang's FA4 JIT
-# kernel will log an import error when flash-attn-4 is absent, but
-# that's non-fatal — the server falls back to the attention backend
-# selected via --attention-backend (triton in this script).
+# NOTE: sglang 0.5.10.post1 hard-depends on flash-attn-4>=4.0.0b4 in
+# its metadata, so we must pass --prerelease=allow for uv to resolve
+# it.  flash-attn-4 installs as a wheel but is never loaded at
+# runtime because --attention-backend triton keeps SGLang off the FA4
+# codepath.  SGLang will log a non-fatal FA4 import error at startup.
 echo "Installing/updating Python dependencies..."
-uv pip install --quiet \
+uv pip install --quiet --prerelease=allow \
     "torch==2.9.1" \
     "torchvision==0.24.1" \
     "torchaudio==2.9.1" \
