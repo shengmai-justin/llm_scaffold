@@ -23,18 +23,6 @@ LOG_DIR="${SCAFFOLD_DIR}/frozen_log"
 # ── Navigate to project dir ───────────────────────────────────
 cd "$SCAFFOLD_DIR"
 
-# ── Clone source repo if not present ─────────────────────────
-if [ ! -d "$SOURCE_REPO" ]; then
-    echo "Cloning autoresearch repo..."
-    git clone https://github.com/karpathy/autoresearch.git "$SOURCE_REPO"
-fi
-
-# ── Copy to frozen working directory ─────────────────────────
-if [ ! -d "$REPO_PATH" ]; then
-    echo "Copying autoresearch to frozen working dir..."
-    cp -r "$SOURCE_REPO" "$REPO_PATH"
-fi
-
 # ── Load modules ──────────────────────────────────────────────
 module load gcc/14.2.0
 module load cuda/12.8.1
@@ -58,15 +46,6 @@ echo "---"
 
 # ── Install deps ──────────────────────────────────────────────
 pip install openai "sglang[all]" --upgrade --quiet
-
-# Sync source repo first (compiles kernels with gcc/cuda loaded)
-cd "$SOURCE_REPO" && uv sync && cd "$SCAFFOLD_DIR"
-
-# Sync frozen copy from source (exclude .git and .venv)
-rsync -a --exclude='.git' --exclude='.venv' "$SOURCE_REPO/" "$REPO_PATH/"
-
-# Build frozen copy's own venv
-cd "$REPO_PATH" && uv sync && cd "$SCAFFOLD_DIR"
 
 # ── Start SGLang server ──────────────────────────────────────
 echo "Starting SGLang server on GPU 0..."
@@ -126,6 +105,7 @@ fi
 echo "Starting experiment loop on GPU 1..."
 CUDA_VISIBLE_DEVICES=1 python main.py \
     --repo-path "$REPO_PATH" \
+    --source-repo "$SOURCE_REPO" \
     --log-dir "$LOG_DIR" \
     --max-experiments "$MAX_EXPERIMENTS" \
     --llm-base-url "http://localhost:$VLLM_PORT/v1" \

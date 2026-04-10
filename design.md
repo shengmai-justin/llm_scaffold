@@ -114,7 +114,7 @@ Setup, the experiment loop, keep/revert decisions, and clean recovery. The only 
 
 | Function | Description |
 |---|---|
-| `main()` | Entry point — parses CLI args, runs setup or resumes, then experiment loop |
+| `main()` | Entry point — parses CLI args (including `--log-dir` to redirect results.tsv/run.log/state.json), runs setup or resumes, then experiment loop |
 | `run_setup(repo_path, max_experiments)` | Runs all setup steps in order |
 | `run_baseline(agent_state)` | Executes the unchanged baseline and records it as the starting point |
 | `run_experiment_loop(state_ref)` | Runs iterations up to max_experiments |
@@ -462,8 +462,8 @@ Phase 6: Checkpoint LoRA + step_log.json + best_train.py
 
 | Function | Description |
 |---|---|
-| `compute_grpo_advantages(rewards)` | Normalized group advantages: `(r - mean) / std` |
-| `erl_train_step(model, optimizer, episodes, reflection, ...)` | One training step with 4 signals |
+| `compute_grpo_advantages(rewards, dr_grpo=False)` | Normalized group advantages. Standard: `(r - mean) / std`. Dr. GRPO (`--dr-grpo` flag): mean-only `(r - mean)` for low-variance reward regimes. |
+| `erl_train_step(model, optimizer, episodes, reflection, dr_grpo=False, ...)` | One training step with 4 signals |
 
 Training signals:
 1. **Attempt1** — GRPO on first-attempt rollouts
@@ -482,7 +482,7 @@ Training signals:
 
 | Function | Description |
 |---|---|
-| `generate_batch_reflection(model, tokenizer, train_py, batch_feedback, ...)` | Generate one reflection per step with logprobs for training |
+| `generate_batch_reflection(model, tokenizer, batch_feedback, best_val_bpb, ...)` | Generate one reflection per step with logprobs for training. Reflection prompt structure: WHAT WORKED & WHY / WHAT FAILED & WHY / DIMINISHING RETURNS CHECK / FUTURE DIRECTION. No train.py in context. |
 | `build_reflection_context(batch_feedback, reflection_text)` | Build context string appended to attempt2 proposal prompts |
 
 ### Data Objects
@@ -620,3 +620,51 @@ def is_duplicate(proposal, history):
 4. If all 3 are duplicates → accept last one (avoid infinite loop)
 
 **Storage:** Append each proposal's edits to `edits_history.jsonl` (one JSON object per experiment with `search` and `replace` fields).
+
+---
+
+## Current State of Prompts
+
+### `prompt.md` (used by frozen, RL, and ERL pipelines for proposals)
+
+```
+You are an ML researcher optimizing a GPT training script (train.py) to minimize val_bpb on a fixed 5-minute training budget.
+
+## Goal
+Achieve the lowest possible val_bpb. **Much larger improvements are possible beyond where you are now** — do not settle early.
+
+## Rules
+- You can ONLY edit train.py using search/replace operations.
+- Your response must be valid JSON matching the schema below.
+- Do not repeat or recycle ideas/experiments that already failed.
+
+## Strategy guidance
+- Diagnose the bottleneck before proposing.
+- Do NOT spend multiple rounds tweaking the same knob.
+- When stuck, combine successful changes or try the opposite.
+
+## Schema
+{description, rationale, risk, edits: [{search, replace}]}
+```
+
+### ERL reflection prompt (`erl_pipeline/erl_reflect.py`)
+
+Structured 4-section analysis:
+1. **WHAT WORKED & WHY** — group improvements, hypothesize mechanisms
+2. **WHAT FAILED & WHY** — group by failure mode, identify root causes
+3. **DIMINISHING RETURNS CHECK** — recommend pivot if gains shrinking
+4. **FUTURE DIRECTION** — concrete suggestions for next experiments
+
+Under 500 words, plain text only. Does NOT include train.py in context (saves tokens, lets reflector focus on results).
+
+---
+
+## Logging & Working Directories
+
+| Pipeline | Working repo | Log directory |
+|---|---|---|
+| Frozen | `autoresearch_frozen/` | `frozen_log/` (via `--log-dir`) |
+| RL | `autoresearch_rl/` | `rl_log/` |
+| ERL | `autoresearch_erl/` | `erl_log/` |
+
+Each pipeline gets its own copy of the autoresearch repo and its own log directory. The frozen pipeline accepts `--log-dir` to redirect `results.tsv`, `run.log`, and `state.json` away from the scaffold root.

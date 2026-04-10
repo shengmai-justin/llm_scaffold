@@ -6,6 +6,7 @@ Usage:
 
 import argparse
 import os
+import shutil
 import signal
 import sys
 from datetime import date
@@ -15,7 +16,8 @@ import planner
 import results
 
 SCAFFOLD_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_REPO_PATH = os.path.join(SCAFFOLD_DIR, "autoresearch")
+DEFAULT_REPO_PATH = os.path.join(SCAFFOLD_DIR, "autoresearch_frozen")
+DEFAULT_SOURCE_REPO = os.path.join(SCAFFOLD_DIR, "autoresearch")
 TRAIN_TIMEOUT = 600  # seconds (5 min budget + startup/compilation overhead)
 
 
@@ -241,6 +243,7 @@ def shutdown_gracefully(agent_state):
 def main():
     parser = argparse.ArgumentParser(description="Autoresearch Agent Scaffold")
     parser.add_argument("--repo-path", default=DEFAULT_REPO_PATH)
+    parser.add_argument("--source-repo", default=DEFAULT_SOURCE_REPO)
     parser.add_argument("--max-experiments", type=int, default=100)
     parser.add_argument("--llm-base-url", default="http://localhost:8000/v1")
     parser.add_argument("--llm-model", default="Qwen/Qwen3.5-9B")
@@ -253,6 +256,16 @@ def main():
         results.RESULTS_FILE = os.path.join(args.log_dir, "results.tsv")
         results.RUN_LOG = os.path.join(args.log_dir, "run.log")
         state.STATE_FILE = os.path.join(args.log_dir, "state.json")
+
+    # Copy from source repo if working repo doesn't exist
+    repo_path = os.path.abspath(args.repo_path)
+    if not os.path.exists(repo_path):
+        source = os.path.abspath(args.source_repo)
+        if not os.path.exists(source):
+            print(f"ERROR: source repo not found at {source}")
+            sys.exit(1)
+        print(f"Copying {source} -> {repo_path}")
+        shutil.copytree(source, repo_path)
 
     if args.resume and os.path.exists(state.STATE_FILE):
         print("Resuming from state.json")
