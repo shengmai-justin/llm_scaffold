@@ -42,9 +42,13 @@
 
 set -euo pipefail
 
-# ── Paths (override via env vars if layout differs) ──────────
-PROJ_DIR="${PROJ_DIR:-$HOME/autoresearch_pro6000}"
-SCAFFOLD_DIR="${SCAFFOLD_DIR:-$PROJ_DIR/llm_scaffold}"
+# ── Paths (auto-detected from script location; override via env) ─
+# SCAFFOLD_DIR defaults to the dir containing this script, so the
+# script works from any layout (~/auto_proj/llm_scaffold,
+# ~/autoresearch_pro6000/llm_scaffold, etc.) without env vars.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCAFFOLD_DIR="${SCAFFOLD_DIR:-$SCRIPT_DIR}"
+PROJ_DIR="${PROJ_DIR:-$(dirname "$SCAFFOLD_DIR")}"
 SOURCE_REPO="${SOURCE_REPO:-$SCAFFOLD_DIR/autoresearch}"
 REPO_PATH="${REPO_PATH:-$SCAFFOLD_DIR/autoresearch_frozen}"
 LOG_DIR="${LOG_DIR:-$SCAFFOLD_DIR/frozen_log}"
