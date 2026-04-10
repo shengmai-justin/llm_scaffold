@@ -96,9 +96,12 @@ Current run: model on GPU 0, 8 eval workers on GPUs 1-4 (2/GPU, 88GB cap), batch
 
 - **Always-reflect** — every step, not gated on failure (no binary success/fail in our task)
 - **One reflection per batch** — model sees all attempt1 results, generates one reflection for all attempt2s
-- **GRPO advantages** — `(reward - mean) / std` normalized within the group
+- **Attempt advantages are switchable via `--adv-type {grpo,ttt}`** —
+  - `grpo` (default): `(reward - mean) / std` normalized within the group
+  - `ttt`: TTT-Discover entropic LOO with adaptive beta (imported from `rl_trainer.compute_entropic_advantages`)
+  - Reflection and distillation signals are unchanged across variants
 - **No PUCT tree** — parent is always the current best code
-- **Four training signals** — GRPO on attempt1, GRPO on reflection, GRPO on attempt2, RAFT distillation
+- **Four training signals** — group advantage on attempt1, single-sample delta on reflection, group advantage on attempt2, RAFT distillation
 - **Train the reflector** — reflection reward = mean(attempt2 rewards), baseline = mean(attempt1 rewards)
 - **LoRA** — same as RL pipeline, easy to switch to full model later
 
@@ -106,7 +109,7 @@ Current run: model on GPU 0, 8 eval workers on GPUs 1-4 (2/GPU, 88GB cap), batch
 
 | Aspect | RL (TTT-Discover) | ERL |
 |--------|-------------------|-----|
-| Advantages | Entropic LOO (adaptive beta) | GRPO (normalized group) |
+| Advantages | Entropic LOO (adaptive beta) | Default GRPO, optional TTT entropic via `--adv-type ttt` |
 | Tree search | PUCT | None (always best code) |
 | Reflection | None | Batch-level, one per step |
 | Training signals | 1 (policy gradient) | 4 (attempt1, reflection, attempt2, distill) |
@@ -168,10 +171,21 @@ python erl_main.py \
 ## Shared Infrastructure
 
 ### Model & Hardware
+
+Two supported targets:
+
+| | B200 (HiPerGator) | Pro 6000 Blackwell |
+|---|---|---|
+| VRAM / GPU | ~180 GB HBM3e | 96 GB GDDR7 |
+| Compute cap | SM 10.0 | SM 12.0 |
+| Env setup | `module load` + shared conda | uv venv, no modules |
+| Attention | SDPA (train.py) | SDPA (`train_sdpa.py`) |
+| train.py peak VRAM | ~74 GB | ~10 GB (much smaller mem footprint on the single workers) |
+| Memlimit | Yes (2 workers/GPU) | No (1 worker/GPU) |
+
 - **Model**: Qwen/Qwen3.5-9B with LoRA (rank 32, alpha 64)
-- **Cluster**: HiPerGator B200, 180GB VRAM per GPU, 8 GPUs per node
-- **CUDA**: 12.8.1, GCC 14.2.0, SDPA attention (FA4 not yet available)
-- **Each train.py**: ~74GB VRAM, ~5 min per run
+- **CUDA**: 12.8.1, GCC 14.2.0 (B200); driver ≥ 12.8 only (Pro 6000)
+- **Each train.py**: ~74 GB on B200 (large DEVICE_BATCH_SIZE), ~10 GB on Pro 6000 when run standalone
 
 ### Reused Modules (never duplicated)
 - `planner.py` — prompt building, edit validation/application
@@ -220,14 +234,36 @@ Follows TTT-Discover's pattern for minimization tasks (erdos_min_overlap):
 | ratio_max | 1.0 | 1.0 |
 | Distilled | N/A | 1 (step 1) |
 
-## Current Runs (5 GPUs, batch_size=8, 2 workers/GPU)
+## Run Scripts (current)
 
-Both pipelines running 100 steps with gpu_mem_limit (88GB/worker):
-- `sbatch rl_pipeline/run_rl_4gpu_memlimit.sh` — 5 GPUs, 3-day limit
-- `sbatch erl_pipeline/run_erl_4gpu_memlimit.sh` — 5 GPUs, 3-day limit
+### B200 (HiPerGator)
+
+| Script | GPUs | Workers/GPU | Batch | Memlimit | Notes |
+|---|---|---|---|---|---|
+| `run.sh` | 2 | — | — | — | Frozen pipeline (SGLang + main.py) |
+| `rl_pipeline/run_rl.sh` | 8 | 1 | 7 | No | Full RL |
+| `rl_pipeline/run_rl_4gpu.sh` | 3 | 1 | 4 | No | Small RL |
+| `rl_pipeline/run_rl_4gpu_memlimit.sh` | 3 | 2 | 8 | 88 GB | Memory-limited RL |
+| `erl_pipeline/run_erl.sh` | 8 | 1 | 7 | No | Full ERL (GRPO) |
+| `erl_pipeline/run_erl_4gpu.sh` | 3 | 1 | 4 | No | Small ERL (GRPO) |
+| `erl_pipeline/run_erl_4gpu_memlimit.sh` | 3 | 2 | 4 | 88 GB | Memory-limited ERL (GRPO) |
+| `erl_pipeline/run_erl_4gpu_ttt.sh` | 3 | 2 | 4 | 88 GB | Memory-limited ERL with `--adv-type ttt` |
+
+All B200 scripts: `--time=12:00:00`, `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
+
+### Pro 6000 Blackwell
+
+| Script | GPUs | Workers/GPU | Batch | Memlimit | Notes |
+|---|---|---|---|---|---|
+| `run_pro6000.sh` | 2 | — | — | — | Frozen pipeline, SGLang `--attention-backend triton` |
+| `erl_pipeline/run_erl_pro6000.sh` | 8 | 1 | 7 | No | Full ERL |
+
+Pro 6000 scripts: uv venv setup, no `module load`, no `flash-attn-4`, no `kernels-community`, auto-install of `train_sdpa.py` over `autoresearch/train.py`.
 
 ## Next Steps
 
 1. **Monitor 100-step runs** — check best_bpb curves, compare RL vs ERL at scale
 2. **Analyze ERL reflection value** — how often does attempt2 beat attempt1?
-3. **Structured reflection template** — refine `REFLECTION_SYSTEM` prompt with domain-specific structure
+3. **Compare `--adv-type grpo` vs `ttt`** — does TTT entropic LOO help when reward variance is small?
+4. **Validate Pro 6000 scripts end-to-end** — first-run model download, SGLang Triton backend, `train_sdpa.py` baseline parity with B200
+5. **Structured reflection template** — refine `REFLECTION_SYSTEM` prompt with domain-specific structure

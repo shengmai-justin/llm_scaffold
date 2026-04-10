@@ -1,11 +1,14 @@
 #!/bin/bash
 # Run the FROZEN pipeline on RTX Pro 6000 Blackwell.
 #
-# Layout: GPU 0 hosts the SGLang LLM server, GPU 1 runs the experiment
-# loop (main.py → planner → train.py).  Only 2 of the 8 Pro 6000s are
-# used because the frozen pipeline is strictly serial — one experiment
-# at a time, waiting on the LLM's response — so extra GPUs would sit
-# idle.  Leave the remaining 6 GPUs free for the ERL job.
+# Layout: 2 GPUs — one hosts the SGLang LLM server, the other runs the
+# experiment loop (main.py → planner → train.py).  Only 2 of the 8 Pro
+# 6000s are used because the frozen pipeline is strictly serial — one
+# experiment at a time, waiting on the LLM's response — so extra GPUs
+# would sit idle.  Leave the remaining 6 GPUs free for the ERL job.
+#
+# This cluster has NO SLURM, so the script auto-picks the 2 GPUs with
+# the least memory used at launch time instead of hardcoding indices.
 #
 # Differences from run.sh (the B200 variant):
 #   1. No `module load` — this cluster has no HPC modules; deps are
@@ -111,21 +114,32 @@ export SGLANG_DISABLE_CUDNN_CHECK=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ── Info ─────────────────────────────────────────────────────
+# ── Auto-pick 2 least-used GPUs (no SLURM on this cluster) ───
+mapfile -t FREE_GPUS < <(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \
+    | sort -t',' -k2 -n | awk -F',' '{gsub(/ /,""); print $1}')
+if [ "${#FREE_GPUS[@]}" -lt 2 ]; then
+    echo "ERROR: need 2 GPUs, found ${#FREE_GPUS[@]}"
+    nvidia-smi --query-gpu=index,memory.used --format=csv
+    exit 1
+fi
+SGLANG_GPU="${FREE_GPUS[0]}"
+MAIN_GPU="${FREE_GPUS[1]}"
+
 echo "Job ID:    ${SLURM_JOB_ID:-local}"
 echo "Node:      $(hostname)"
 echo "GPUs:      $(nvidia-smi -L 2>/dev/null | wc -l)"
 echo "Model:     $MODEL"
-echo "Mode:      Frozen Pro 6000 2-GPU (SGLang=GPU0, main.py=GPU1)"
+echo "Mode:      Frozen Pro 6000 2-GPU (SGLang=GPU${SGLANG_GPU}, main.py=GPU${MAIN_GPU})"
 echo "Repo:      $REPO_PATH"
 echo "Started:   $(date)"
 echo "---"
 
-# ── Start SGLang server on GPU 0 ─────────────────────────────
+# ── Start SGLang server on the chosen GPU ────────────────────
 # --attention-backend triton forces SGLang off its FA4 codepath so we
 # don't depend on flash-attn-4 being installed.  Triton JIT-compiles
 # per device, which is fine on SM 12.0 (Pro 6000 Blackwell).
-echo "Starting SGLang server on GPU 0..."
-CUDA_VISIBLE_DEVICES=0 python -m sglang.launch_server \
+echo "Starting SGLang server on GPU ${SGLANG_GPU}..."
+CUDA_VISIBLE_DEVICES="$SGLANG_GPU" python -m sglang.launch_server \
     --model-path "$MODEL" \
     --port "$VLLM_PORT" \
     --tp-size 1 \
@@ -166,9 +180,9 @@ if ! curl -s "http://localhost:$VLLM_PORT/health" > /dev/null 2>&1; then
     exit 1
 fi
 
-# ── Run experiments on GPU 1 ─────────────────────────────────
-echo "Starting experiment loop on GPU 1..."
-CUDA_VISIBLE_DEVICES=1 python main.py \
+# ── Run experiments on the chosen GPU ────────────────────────
+echo "Starting experiment loop on GPU ${MAIN_GPU}..."
+CUDA_VISIBLE_DEVICES="$MAIN_GPU" python main.py \
     --repo-path "$REPO_PATH" \
     --source-repo "$SOURCE_REPO" \
     --log-dir "$LOG_DIR" \

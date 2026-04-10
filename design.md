@@ -24,9 +24,12 @@ llm_scaffold/
 ├── planner.py       — context assembly, LLM proposal, search/replace editing
 ├── results.py       — execution, log parsing, result logging, keep/discard decision
 ├── prompt.md        — system prompt template for the LLM planner
-├── run.sh           — SLURM launch script (1 GPU, SGLang server + frozen pipeline)
+├── run.sh           — SLURM launch (2× B200, SGLang server + experiment loop)
+├── run_pro6000.sh   — SLURM launch (2× Pro 6000 Blackwell, uv venv, SDPA, no modules)
+├── train_sdpa.py    — SDPA-only autoresearch/train.py for Pro 6000 (SM 12.0)
 ├── serve.sh         — standalone SGLang server launch
 ├── setup.sh         — environment setup helper
+├── clean.sh         — wipe frozen working dir + logs (parallel unlink + rm -rf fallback)
 ├── pyproject.toml   — project metadata (depends on openai>=1.0.0)
 │
 ├── state.json       — persistent agent state (generated at runtime)
@@ -41,10 +44,10 @@ llm_scaffold/
 │   ├── rl_sampler.py           — PUCT tree search (State stores code, not git commits)
 │   ├── rl_eval.py              — Ray EvalWorker (supports --gpu-mem-limit-mb)
 │   ├── rl_types.py             — Rollout dataclass
-│   ├── run_rl.sh               — SLURM 8-GPU (1 worker/GPU)
-│   ├── run_rl_4gpu.sh          — SLURM 3-GPU (1 worker/GPU, batch=4)
-│   ├── run_rl_4gpu_memlimit.sh — SLURM 5-GPU (2 workers/GPU, 88GB cap, batch=8)
-│   ├── run_rl_memlimit_test.sh — SLURM 3-GPU memlimit test (3 steps)
+│   ├── run_rl.sh               — SLURM 8-GPU B200 (1 worker/GPU)
+│   ├── run_rl_4gpu.sh          — SLURM 3-GPU B200 (1 worker/GPU, batch=4)
+│   ├── run_rl_4gpu_memlimit.sh — SLURM 3-GPU B200 (2 workers/GPU, 88GB cap, batch=8)
+│   ├── run_rl_memlimit_test.sh — SLURM 3-GPU B200 memlimit test (3 steps)
 │   ├── smoke_test.py           — GPU smoke test (8 components)
 │   ├── debug_generate.py       — debug: generate one proposal, print raw output
 │   ├── mock_rl_test.py         — mock RL loop test (no GPU needed)
@@ -52,14 +55,16 @@ llm_scaffold/
 │
 ├── erl_pipeline/
 │   ├── erl_main.py              — phased loop: attempt1 → reflect → attempt2 → train
-│   ├── erl_trainer.py           — GRPO advantages, 4 training signals
+│   ├── erl_trainer.py           — 4 training signals (attempt advantages via --adv-type grpo|ttt)
 │   ├── erl_feedback.py          — batch-level structured feedback
 │   ├── erl_reflect.py           — one reflection per step, shared by all attempt2s
 │   ├── erl_types.py             — Episode + StepReflection dataclasses
-│   ├── run_erl.sh               — SLURM 8-GPU (1 worker/GPU)
-│   ├── run_erl_4gpu.sh          — SLURM 3-GPU (1 worker/GPU, batch=4)
-│   ├── run_erl_4gpu_memlimit.sh — SLURM 5-GPU (2 workers/GPU, 88GB cap, batch=8)
-│   ├── clean.sh                 — cleanup script
+│   ├── run_erl.sh               — SLURM 8-GPU B200 (1 worker/GPU)
+│   ├── run_erl_4gpu.sh          — SLURM 3-GPU B200 (1 worker/GPU, batch=4)
+│   ├── run_erl_4gpu_memlimit.sh — SLURM 3-GPU B200 (2 workers/GPU, 88GB cap, batch=4)
+│   ├── run_erl_4gpu_ttt.sh      — SLURM 3-GPU B200 variant using TTT entropic advantages
+│   ├── run_erl_pro6000.sh       — SLURM 8-GPU Pro 6000 Blackwell (uv venv, no memlimit)
+│   ├── clean.sh                 — cleanup script (parallel unlink + rm -rf fallback)
 │   ├── mock_erl_test.py         — logic tests (no GPU)
 │   ├── smoke_test_erl.py        — GPU smoke test (1 GPU)
 │   └── (reuses rl_model.py, rl_eval.py, rl_planner.py, rl_types.py)
@@ -403,7 +408,7 @@ PUCTSampler methods:
 
 ## GPU Memory Limiter
 
-`LD_PRELOAD` library to enforce per-process GPU memory limits. Needed for running 2 train.py workers per B200 GPU (each uses ~74GB, B200 has 180GB).
+`LD_PRELOAD` library to enforce per-process GPU memory limits. Needed for running 2 train.py workers per B200 GPU (each uses ~74GB, B200 has 180GB). **Not used on Pro 6000 Blackwell** — each 96 GB card easily hosts one eval worker by itself, so the Pro 6000 run scripts omit `--gpu-mem-limit-mb` entirely.
 
 Intercepts both CUDA runtime API (`cudaMalloc`, `cudaFree`, `cudaMemGetInfo`, async variants) and driver API (`cuMemCreate`, `cuMemRelease`, `cuMemAlloc_v2`, `cuMemFree_v2`, `cuMemGetInfo_v2`). Driver API interception is required for PyTorch 2.x + CUDA 12.x which uses expandable segments (`cuMemCreate`) by default.
 
@@ -427,9 +432,9 @@ Implements the ERL framework (arXiv:2602.13949) adapted for train.py optimizatio
 
 1. **Always-reflect** — reflection on every step, not gated on failure (our task has no binary success/fail)
 2. **One reflection per batch** — model sees all attempt1 results, generates one shared reflection for all attempt2s
-3. **GRPO advantages** — `(reward - mean) / std` normalized within the group (not entropic LOO)
+3. **Attempt advantages are switchable** — `--adv-type grpo` (default) uses `(reward - mean) / std` normalized within the group; `--adv-type ttt` uses TTT-Discover's entropic LOO with adaptive beta (imported from `rl_trainer.compute_entropic_advantages`). Reflection and distillation signals are unchanged across variants.
 4. **No PUCT tree** — parent is always the current best code
-5. **Four training signals** — GRPO on attempt1, GRPO on reflection, GRPO on attempt2, RAFT distillation
+5. **Four training signals** — attempt1 + attempt2 (group advantage, either GRPO or TTT), reflection (single-sample delta vs attempt1 mean), RAFT distillation (supervised NLL)
 6. **LoRA** — not full model fine-tuning (infrastructure constraint, easy to switch later)
 
 ### Step Flow
@@ -456,12 +461,13 @@ Phase 6: Checkpoint LoRA + step_log.json + best_train.py
 | `dispatch_eval(...)` / `collect_eval(...)` | Ray parallel eval dispatch/collect |
 | `build_distill_ids(...)` | Build distillation target: attempt2 response paired with original prompt |
 
-#### `erl_trainer.py` — GRPO + RAFT Training
+#### `erl_trainer.py` — Group-advantage + RAFT Training
 
 | Function | Description |
 |---|---|
 | `compute_grpo_advantages(rewards, dr_grpo=False)` | Normalized group advantages. Standard: `(r - mean) / std`. Dr. GRPO (`--dr-grpo` flag): mean-only `(r - mean)` for low-variance reward regimes. |
-| `erl_train_step(model, optimizer, episodes, reflection, dr_grpo=False, ...)` | One training step with 4 signals |
+| `compute_attempt_advantages(rewards, adv_type, dr_grpo=False)` | Dispatcher: `"grpo"` → `compute_grpo_advantages`, `"ttt"` → `compute_entropic_advantages` (TTT-Discover LOO with adaptive beta, imported from `rl_trainer`). |
+| `erl_train_step(model, optimizer, episodes, reflection, dr_grpo=False, adv_type="grpo", ...)` | One training step with 4 signals. Attempt1 / attempt2 rollouts use the dispatcher; reflection and distillation are unchanged. |
 
 Training signals:
 1. **Attempt1** — GRPO on first-attempt rollouts

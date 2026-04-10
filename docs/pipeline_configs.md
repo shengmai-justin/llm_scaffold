@@ -56,7 +56,10 @@ Step k
 
 ## Shared Configuration
 
-All pipelines run on HiPerGator B200 nodes.
+Two supported hardware targets:
+
+- **HiPerGator B200** — original target. Uses `module load gcc/14.2.0 cuda/12.8.1 conda` + shared conda env. Scripts: `run.sh`, `run_rl*.sh`, `run_erl*.sh` (non-`pro6000` variants).
+- **Pro 6000 Blackwell (SM 12.0)** — newer target. No modules, no conda. Scripts (`run_pro6000.sh`, `run_erl_pro6000.sh`) install a pinned stack into a local uv venv and use SDPA everywhere (no flash-attn-4 / kernels-community / cutlass-dsl). `train_sdpa.py` at the scaffold root is the SDPA variant of `autoresearch/train.py` that the Pro 6000 scripts auto-install into the source repo on every run.
 
 | Parameter | Value |
 |---|---|
@@ -65,11 +68,13 @@ All pipelines run on HiPerGator B200 nodes.
 | Learning rate | 4e-5 |
 | KL coefficient | 0.1 |
 | Temperature | 0.7 |
-| Max new tokens | 8192 |
-| Attention | SDPA |
+| Max new tokens | 8192 (small B200) / 16384 (memlimit + Pro 6000) |
+| Attention | SDPA (all variants) |
 | Eval timeout | 600s per `train.py` run |
 | Reward | `1/val_bpb` (success) or `0.0` (crash) |
-| Modules | gcc/14.2.0, cuda/12.8.1, conda |
+| ERL attempt advantages | `--adv-type grpo` (default) or `--adv-type ttt` (entropic LOO) |
+| B200 modules | gcc/14.2.0, cuda/12.8.1, conda |
+| Pro 6000 env setup | uv venv + pinned pip install (no modules) |
 
 ## Run Scripts
 
@@ -101,20 +106,52 @@ All pipelines run on HiPerGator B200 nodes.
 | Time limit | 10 days | 4 days |
 | Submit | `sbatch rl_pipeline/run_rl.sh` | `sbatch erl_pipeline/run_erl.sh` |
 
-### Memory-limited production (5 GPUs, 2 workers/GPU)
+### Memory-limited (3 GPUs, 2 workers/GPU, B200)
 
 | | RL | ERL |
 |---|---|---|
 | Script | `rl_pipeline/run_rl_4gpu_memlimit.sh` | `erl_pipeline/run_erl_4gpu_memlimit.sh` |
-| SBATCH GPUs | 5 | 5 |
+| SBATCH GPUs | 3 | 3 |
 | Model GPU | 0 | 0 |
-| Eval GPUs | 1,2,3,4 | 1,2,3,4 |
+| Eval GPUs | 1,2 | 1,2 |
 | Workers/GPU | 2 | 2 |
 | GPU mem limit | 88000 MB per worker | 88000 MB per worker |
-| Batch size | 8 | 8 |
+| Batch size | 8 | 4 |
+| Max new tokens | 8192 | 16384 |
 | Steps | 100 | 100 |
-| Time limit | 3 days | 3 days |
+| Time limit | 12 hours | 12 hours |
 | Submit | `sbatch rl_pipeline/run_rl_4gpu_memlimit.sh` | `sbatch erl_pipeline/run_erl_4gpu_memlimit.sh` |
+
+### ERL TTT-advantages variant (3 GPUs, B200)
+
+Same layout as `run_erl_4gpu_memlimit.sh` but passes `--adv-type ttt` to swap attempt1 / attempt2 advantages from GRPO to TTT-Discover entropic LOO. Reflection + distillation signals unchanged.
+
+| Script | `erl_pipeline/run_erl_4gpu_ttt.sh` |
+|---|---|
+| SBATCH GPUs | 3 |
+| Workers/GPU | 2 |
+| Batch size | 4 |
+| Adv type | `ttt` |
+| Log dir | `./erl_log_ttt` (isolated from GRPO runs) |
+| Submit | `sbatch erl_pipeline/run_erl_4gpu_ttt.sh` |
+
+### Pro 6000 Blackwell (8 GPUs)
+
+| | Frozen | ERL |
+|---|---|---|
+| Script | `run_pro6000.sh` | `erl_pipeline/run_erl_pro6000.sh` |
+| SBATCH GPUs | 2 | 8 |
+| Model GPU | 0 (SGLang) | 0 |
+| Experiment / eval GPUs | 1 (main.py) | 1,2,3,4,5,6,7 |
+| Workers/GPU | — | 1 |
+| GPU mem limit | none (single SGLang + single main.py) | none (96 GB is plenty) |
+| Batch size | — | 7 |
+| Steps | unlimited | 50 |
+| Env setup | uv venv + pinned pip install, no modules | same |
+| Attention backend | SGLang `--attention-backend triton` | SDPA (`--attn-impl sdpa`) |
+| train.py variant | `train_sdpa.py` auto-installed into source | same |
+| Time limit | 12 hours | 12 hours |
+| Submit | `sbatch run_pro6000.sh` | `sbatch erl_pipeline/run_erl_pro6000.sh` |
 
 ### Memory-limited test (3 GPUs, quick validation)
 
@@ -181,6 +218,7 @@ RL and ERL pipelines are fully isolated and can run simultaneously.
 ## Quick Reference
 
 ```bash
+# ── B200 ────────────────────────────────────────────────────
 # Dev test (3 GPUs, 1 worker/GPU)
 sbatch rl_pipeline/run_rl_4gpu.sh
 sbatch erl_pipeline/run_erl_4gpu.sh
@@ -189,9 +227,24 @@ sbatch erl_pipeline/run_erl_4gpu.sh
 sbatch rl_pipeline/run_rl.sh
 sbatch erl_pipeline/run_erl.sh
 
-# Memory-limited test (3 GPUs, 2 workers/GPU)
-sbatch rl_pipeline/run_rl_memlimit_test.sh
+# Memory-limited (3 GPUs, 2 workers/GPU)
+sbatch rl_pipeline/run_rl_4gpu_memlimit.sh
+sbatch erl_pipeline/run_erl_4gpu_memlimit.sh
 
+# ERL with TTT-Discover entropic advantages (3 GPUs)
+sbatch erl_pipeline/run_erl_4gpu_ttt.sh
+
+# Frozen (2 GPUs, SGLang + experiment loop)
+sbatch run.sh
+
+# ── Pro 6000 Blackwell ──────────────────────────────────────
+# Frozen (2 GPUs)
+sbatch run_pro6000.sh
+
+# ERL (8 GPUs, no memlimit)
+sbatch erl_pipeline/run_erl_pro6000.sh
+
+# ── Ops ─────────────────────────────────────────────────────
 # Check job status
 squeue -u $USER
 
