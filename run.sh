@@ -47,6 +47,9 @@ echo "---"
 # ── Install deps ──────────────────────────────────────────────
 pip install openai "sglang[all]" --upgrade --quiet
 
+# Sync source repo (main.py copies source → frozen working dir)
+cd "$SOURCE_REPO" && uv sync && cd "$SCAFFOLD_DIR"
+
 # ── Start SGLang server ──────────────────────────────────────
 echo "Starting SGLang server on GPU 0..."
 CUDA_VISIBLE_DEVICES=0 python -m sglang.launch_server \
