@@ -38,6 +38,11 @@ module load cuda/12.8.1
 module load conda
 conda activate "$CONDA_ENV"
 export HF_HOME="${PROJ_DIR}/.cache/huggingface"
+# Reduce PyTorch allocator fragmentation on long training loops.
+# Without this, the ERL main process on GPU 0 accumulates reserved-but-unused
+# blocks across phases (generation, reflection, distillation, train) and OOMs
+# even though live memory is well under the B200's 180 GB.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Compile memory limiter
 make -C "${SCAFFOLD_DIR}/gpu_mem_limit" clean && make -C "${SCAFFOLD_DIR}/gpu_mem_limit"

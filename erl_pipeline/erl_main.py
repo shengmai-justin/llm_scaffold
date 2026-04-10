@@ -312,6 +312,10 @@ def main():
         print(f"ERL Step {step}/{args.num_steps} | Best: {best_bpb:.6f}")
         print(f"{'='*60}")
 
+        # Release fragmentation accumulated across the previous step's
+        # generation + training phases before starting fresh rollouts.
+        torch.cuda.empty_cache()
+
         episodes: list[Episode] = []
 
         # ── Phase 1: All first attempts ──

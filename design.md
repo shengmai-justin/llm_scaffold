@@ -143,8 +143,6 @@ Everything that reads from or writes to disk: agent state, git operations, and r
 | `create_experiment_branch(repo_path, branch_name)` | Creates and switches to the experiment branch |
 | `commit_train_change(repo_path, message)` | Stages and commits `train.py` |
 | `reset_to_commit(repo_path, commit_hash)` | Resets the repo to a known good commit (`git reset --hard`) |
-| `verify_clean_repo(repo_path)` | Checks `train.py` has no uncommitted changes |
-| `ensure_clean_repo(repo_path)` | Resets dirty `train.py` if needed (e.g. from interrupted run), then verifies clean |
 
 **Files**
 
