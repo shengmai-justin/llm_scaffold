@@ -16,6 +16,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "rl_pipeline"))
 
 from rl_model import compute_response_logprobs, compute_base_logprobs
+from rl_trainer import compute_entropic_advantages
 from rl_types import Rollout
 from erl_types import Episode, StepReflection
 
@@ -43,6 +44,21 @@ def compute_grpo_advantages(rewards: list[float], dr_grpo: bool = False) -> torc
     return (r - mean) / std
 
 
+def compute_attempt_advantages(
+    rewards: list[float], adv_type: str, dr_grpo: bool = False,
+) -> torch.Tensor:
+    """Dispatch attempt-rollout advantages between GRPO and TTT entropic.
+
+    - "grpo": GRPO (or Dr. GRPO via dr_grpo flag)
+    - "ttt":  TTT-Discover LOO entropic advantages with adaptive beta
+    """
+    if adv_type == "ttt":
+        return compute_entropic_advantages(rewards)
+    if adv_type == "grpo":
+        return compute_grpo_advantages(rewards, dr_grpo=dr_grpo)
+    raise ValueError(f"Unknown adv_type: {adv_type!r} (expected 'grpo' or 'ttt')")
+
+
 def erl_train_step(
     model,
     optimizer,
@@ -52,10 +68,13 @@ def erl_train_step(
     temperature: float = 1.0,
     max_grad_norm: float = 1.0,
     dr_grpo: bool = False,
+    adv_type: str = "grpo",
 ) -> dict:
     """One ERL training step with four signals.
 
-    Advantages are computed internally via GRPO (not passed in).
+    Attempt advantages are computed internally via `adv_type`:
+    "grpo" (default) or "ttt" (entropic LOO).  Reflection and
+    distillation signals are unchanged.
     """
     optimizer.zero_grad()
     total_grpo_loss = 0.0
@@ -67,10 +86,10 @@ def erl_train_step(
     all_ratios = []
     all_kls = []
 
-    # --- Signal 1: Attempt1 rollouts (GRPO) ---
+    # --- Signal 1: Attempt1 rollouts (group advantage) ---
     a1_rollouts = [ep.attempt1_rollout for ep in episodes if ep.train_attempt1 and ep.attempt1_rollout.full_ids.numel() > 0]
     if len(a1_rollouts) >= 2:
-        a1_advs = compute_grpo_advantages([r.reward for r in a1_rollouts], dr_grpo=dr_grpo)
+        a1_advs = compute_attempt_advantages([r.reward for r in a1_rollouts], adv_type, dr_grpo=dr_grpo)
         for rollout, adv in zip(a1_rollouts, a1_advs):
             if abs(adv.item()) < 1e-8:
                 continue
@@ -93,10 +112,10 @@ def erl_train_step(
             total_reflect_loss += m["loss"] * m["tokens"]
             num_reflect_tokens += m["tokens"]
 
-    # --- Signal 3: Attempt2 rollouts (GRPO) ---
+    # --- Signal 3: Attempt2 rollouts (group advantage) ---
     a2_rollouts = [ep.attempt2_rollout for ep in episodes if ep.train_attempt2 and ep.attempt2_rollout is not None and ep.attempt2_rollout.full_ids.numel() > 0]
     if len(a2_rollouts) >= 2:
-        a2_advs = compute_grpo_advantages([r.reward for r in a2_rollouts], dr_grpo=dr_grpo)
+        a2_advs = compute_attempt_advantages([r.reward for r in a2_rollouts], adv_type, dr_grpo=dr_grpo)
         for rollout, adv in zip(a2_rollouts, a2_advs):
             if abs(adv.item()) < 1e-8:
                 continue

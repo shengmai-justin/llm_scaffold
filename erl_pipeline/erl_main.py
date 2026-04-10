@@ -213,6 +213,8 @@ def main():
     parser.add_argument("--max-new-tokens", type=int, default=8192)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--dr-grpo", action="store_true", help="Use Dr. GRPO (mean-only, no std normalization)")
+    parser.add_argument("--adv-type", choices=["grpo", "ttt"], default="grpo",
+                        help="Attempt-rollout advantage: 'grpo' (default) or 'ttt' (TTT-Discover entropic LOO)")
     parser.add_argument("--attn-impl", default="sdpa")
     parser.add_argument("--log-dir", default=os.path.join(PIPELINE_DIR, "erl_log"))
     parser.add_argument("--resume-step", type=int, default=None)
@@ -501,6 +503,7 @@ def main():
             temperature=args.temperature,
             max_grad_norm=args.max_grad_norm,
             dr_grpo=args.dr_grpo,
+            adv_type=args.adv_type,
         )
         n_distilled = sum(1 for ep in episodes if ep.train_distill)
         print(f"\n  ERL update: grpo={metrics['avg_grpo_loss']:.4f} "
