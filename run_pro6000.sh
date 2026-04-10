@@ -118,6 +118,28 @@ export SGLANG_DISABLE_CUDNN_CHECK=1
 # and the experiment-loop process.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+# ── CUDA toolkit sanity check ────────────────────────────────
+# sglang transitively imports deep_gemm, which asserts on a missing
+# CUDA_HOME at import time.  The Pro 6000 cluster ships only the
+# driver, not the toolkit — install it to $HOME/cuda-XX.Y and export
+# CUDA_HOME in your shell (or inherit from nvcc on PATH).
+if [ -z "${CUDA_HOME:-}" ]; then
+    if command -v nvcc >/dev/null 2>&1; then
+        CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"
+        export CUDA_HOME
+    fi
+fi
+if [ -z "${CUDA_HOME:-}" ] || [ ! -x "$CUDA_HOME/bin/nvcc" ]; then
+    echo "ERROR: CUDA toolkit not found."
+    echo "  nvcc not on PATH and CUDA_HOME is unset or invalid."
+    echo "  Install the toolkit (e.g. local runfile install to \$HOME/cuda-12.8)"
+    echo "  and export CUDA_HOME + PATH + LD_LIBRARY_PATH in your shell."
+    exit 1
+fi
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+echo "CUDA_HOME: $CUDA_HOME ($(nvcc --version | grep -oE 'release [0-9.]+' | head -1))"
+
 # ── Info ─────────────────────────────────────────────────────
 # ── Auto-pick 2 least-used GPUs (no SLURM on this cluster) ───
 mapfile -t FREE_GPUS < <(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \
