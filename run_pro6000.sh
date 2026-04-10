@@ -76,6 +76,18 @@ else
     echo "WARNING: ${SCAFFOLD_DIR}/train_sdpa.py not found; using whatever is in autoresearch/train.py."
 fi
 
+# ── Wipe stale autoresearch_frozen/.venv if present ──────────
+# Older runs may have created this venv against system Python 3.10
+# (no Python.h → triton gcc JIT fails).  Remove so `uv run train.py`
+# recreates it with the uv-managed standalone Python.
+if [ -d "${REPO_PATH}/.venv" ]; then
+    PY_LINK=$(readlink -f "${REPO_PATH}/.venv/bin/python" 2>/dev/null || echo "")
+    if [[ "$PY_LINK" != *".local/share/uv/python"* ]]; then
+        echo "Removing stale ${REPO_PATH}/.venv (system-Python based)..."
+        rm -rf "${REPO_PATH}/.venv"
+    fi
+fi
+
 # ── Install uv if missing ────────────────────────────────────
 if ! command -v uv >/dev/null 2>&1; then
     echo "Installing uv..."
@@ -118,6 +130,14 @@ export SGLANG_DISABLE_CUDNN_CHECK=1
 # and the experiment-loop process.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+# Force every uv invocation (including `uv run train.py` called from
+# results.py in autoresearch_frozen/) to use a uv-managed standalone
+# Python.  System Python 3.10 on this box ships no Python.h, which
+# breaks triton's gcc JIT compile inside train.py.  Managed Python
+# ships headers.
+export UV_PYTHON_PREFERENCE=only-managed
+uv python install 3.10 >/dev/null 2>&1 || true
+
 # ── CUDA toolkit sanity check ────────────────────────────────
 # sglang transitively imports deep_gemm, which asserts on a missing
 # CUDA_HOME at import time.  The Pro 6000 cluster ships only the
@@ -145,6 +165,11 @@ export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
 # LIBRARY_PATH is the link-time search path (not LD_LIBRARY_PATH).
 if [ -f "$CUDA_HOME/lib64/stubs/libcuda.so" ]; then
     export LIBRARY_PATH="$CUDA_HOME/lib64/stubs:${LIBRARY_PATH:-}"
+fi
+# Triton's cuda_utils.c does #include <cuda.h>.  gcc needs $CUDA_HOME/include
+# on its header search path — CPATH is the standard env var for that.
+if [ -d "$CUDA_HOME/include" ]; then
+    export CPATH="$CUDA_HOME/include:${CPATH:-}"
 fi
 echo "CUDA_HOME: $CUDA_HOME ($(nvcc --version | grep -oE 'release [0-9.]+' | head -1))"
 
