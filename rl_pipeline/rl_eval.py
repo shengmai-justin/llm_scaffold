@@ -15,11 +15,35 @@ import ray
 
 
 def create_worker_repo(base_repo: str, worker_id: int) -> str:
-    """Create isolated repo copy for a worker."""
+    """Create isolated repo dir for a worker, sharing the parent's venv.
+
+    Each worker needs its own directory so parallel writes to `train.py`
+    don't race, but the venv is read-only during training — every worker
+    imports the same site-packages.  Copying ~15 GB per worker is pure
+    waste, so we:
+
+      1. Copy the repo without `.venv/`
+      2. Symlink the worker's `.venv` at the parent's `.venv`
+
+    Net effect: N workers cost ~(repo - venv) extra each, not N * repo.
+    Parent venv stays at 15 GB; each worker is ~20 MB.
+    """
     repo_name = os.path.basename(base_repo)
     worker_dir = os.path.join(os.path.dirname(base_repo), f"{repo_name}_worker_{worker_id}")
+
     if not os.path.exists(worker_dir):
-        shutil.copytree(base_repo, worker_dir)
+        shutil.copytree(
+            base_repo,
+            worker_dir,
+            ignore=shutil.ignore_patterns(".venv", "__pycache__", "*.pyc"),
+        )
+
+    # Share parent venv via symlink so `uv run` resolves it transparently
+    worker_venv = os.path.join(worker_dir, ".venv")
+    parent_venv = os.path.join(base_repo, ".venv")
+    if not os.path.exists(worker_venv) and os.path.isdir(parent_venv):
+        os.symlink(parent_venv, worker_venv)
+
     return worker_dir
 
 
