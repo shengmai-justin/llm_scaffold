@@ -132,8 +132,12 @@ Same layout as `run_erl_4gpu_memlimit.sh` but passes `--adv-type ttt` to swap at
 | Workers/GPU | 2 |
 | Batch size | 4 |
 | Adv type | `ttt` |
+| Working repo | `autoresearch_erl_ttt/` (isolated from GRPO `autoresearch_erl/`) |
+| Worker dirs | `autoresearch_erl_ttt_worker_*/` |
 | Log dir | `./erl_log_ttt` (isolated from GRPO runs) |
 | Submit | `sbatch erl_pipeline/run_erl_4gpu_ttt.sh` |
+
+TTT and GRPO runs can coexist on the same filesystem without interfering — each variant has its own working repo, worker dirs, and log dir.
 
 ### Pro 6000 Blackwell (8 GPUs)
 
@@ -206,14 +210,16 @@ make -C gpu_mem_limit clean && make -C gpu_mem_limit
 
 RL and ERL pipelines are fully isolated and can run simultaneously.
 
-| | RL | ERL |
-|---|---|---|
-| Repo copy | `autoresearch_rl/` | `autoresearch_erl/` |
-| Workers | `autoresearch_rl_worker_*/` | `autoresearch_erl_worker_*/` |
-| Logs | `rl_pipeline/rl_log/` | `erl_pipeline/erl_log/` |
-| Results | `rl_pipeline/rl_log/results.tsv` | `erl_pipeline/erl_log/results.tsv` |
-| Run log | `rl_pipeline/rl_log/run.log` | `erl_pipeline/erl_log/run.log` |
-| Clean | `bash rl_pipeline/clean.sh` | `bash erl_pipeline/clean.sh` |
+| | RL | ERL | ERL (TTT) |
+|---|---|---|---|
+| Repo copy | `autoresearch_rl/` | `autoresearch_erl/` | `autoresearch_erl_ttt/` |
+| Workers | `autoresearch_rl_worker_*/` | `autoresearch_erl_worker_*/` | `autoresearch_erl_ttt_worker_*/` |
+| Worker venv | symlinked → parent `.venv` | symlinked → parent `.venv` | symlinked → parent `.venv` |
+| Logs | `rl_pipeline/rl_log/` | `erl_pipeline/erl_log/` | `erl_pipeline/erl_log_ttt/` |
+| Results | `rl_pipeline/rl_log/results.tsv` | `erl_pipeline/erl_log/results.tsv` | `erl_pipeline/erl_log_ttt/results.tsv` |
+| Clean | `bash rl_pipeline/clean.sh` | `bash erl_pipeline/clean.sh` | `bash erl_pipeline/clean.sh` (cleans both variants) |
+
+**Worker venv sharing:** `rl_eval.py:create_worker_repo` copies the repo without `.venv/` and symlinks the worker's `.venv` at the parent's. This drops per-worker disk cost from ~15 GB (full venv clone) to ~20 MB (code only + symlink). Safe because the venv is read-only during training — workers only import from it. Deletion order matters: `clean.sh` wipes worker dirs first (they contain symlinks, not real venv bytes), then the source repo (which owns the real venv).
 
 ## Quick Reference
 

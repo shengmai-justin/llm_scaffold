@@ -24,8 +24,11 @@ clean.sh        — wipe frozen working dir + logs (parallel unlink + rm -rf fal
 **RL pipeline** (`rl_pipeline/`, TTT-Discover style with PUCT tree search and entropic LOO advantages)
 
 **ERL pipeline** (`erl_pipeline/`, Experiential RL — phased loop with one reflection per step, GRPO + RAFT distillation)
+- `--adv-type ttt` (`run_erl_4gpu_ttt.sh`) swaps attempt advantages to TTT-Discover entropic LOO. TTT runs namespace their working dirs (`autoresearch_erl_ttt/`, `autoresearch_erl_ttt_worker_*/`) so they don't clash with default GRPO runs.
 
 All three pipelines copy the source `autoresearch/` repo into their own working directory (`autoresearch_frozen/`, `autoresearch_rl/`, `autoresearch_erl/`) via `shutil.copytree`.
+
+**Ray worker venv sharing:** `rl_pipeline/rl_eval.py:create_worker_repo` copies the pipeline repo **without** `.venv/` and symlinks the worker's `.venv` at the parent's. Per-worker disk cost drops from ~15 GB (full venv clone) to ~20 MB (code + symlink). Safe because every worker only imports from the venv — nothing mutates `site-packages` mid-run. Critical for `/blue/buyuheng`'s 4 TB group quota on HiPerGator.
 
 ## Setup
 
@@ -63,30 +66,52 @@ sbatch erl_pipeline/run_erl.sh             # ERL pipeline (8× B200)
 
 **Prerequisites**
 - 8× RTX Pro 6000 Blackwell (96 GB each)
-- NVIDIA driver + CUDA runtime ≥ 12.8
-- Python 3.10+ on PATH (uv installed automatically if missing)
-- No modules, no conda required
+- NVIDIA driver installed (runtime only — toolkit not required on the box)
+- **No modules, no conda, no SLURM.** The `#SBATCH` lines in `run_pro6000.sh` are just shell comments when bash executes the script, and it auto-picks the 2 least-used GPUs via `nvidia-smi`.
 
-**One-time setup**
+**One-time setup — CUDA toolkit (no sudo required)**
+
+The Pro 6000 box typically ships with only the driver. You need a local CUDA toolkit install for `nvcc`, `cuda.h`, and `libcuda.so` stubs — `sglang` → `deep_gemm` asserts on a missing `CUDA_HOME` at import time otherwise, and triton's gcc JIT step needs the headers.
+
 ```bash
-# 1. Clone the scaffold on the Pro 6000 cluster
+# 1. Install CUDA 12.8 toolkit to $HOME (match your driver's max CUDA version from `nvidia-smi`)
+wget https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda_12.8.0_570.86.10_linux.run
+sh cuda_12.8.0_570.86.10_linux.run --silent --toolkit \
+   --toolkitpath=$HOME/cuda-12.8 --no-opengl-libs --override
+
+# 2. Add to ~/.bashrc
+cat >> ~/.bashrc <<'EOF'
+export CUDA_HOME=$HOME/cuda-12.8
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+EOF
+source ~/.bashrc
+nvcc --version    # verify
+```
+
+**One-time setup — clone and launch**
+
+```bash
 git clone git@github.com:<your-username>/llm_scaffold.git
-export PROJ_DIR=/path/to/parent_of_scaffold   # scripts read this env var
+cd llm_scaffold
+bash run_pro6000.sh        # all first-run bootstrapping happens inside the script
 ```
-No manual pip install — the Pro 6000 run scripts create a uv venv at
-`$SCAFFOLD_DIR/.venv_pro6000` on first run and install the pinned stack
-(torch 2.9.1 + transformers + peft + accelerate + autoresearch data
-deps) into it. No `flash-attn-4`, no `kernels-community`, no
-`cutlass-dsl` — the SDPA `train_sdpa.py` and SGLang's Triton attention
-backend need none of those.
 
-**Run**
+The script handles everything on first run:
+- Installs `uv` if missing
+- Downloads a **uv-managed** standalone Python 3.10 (`UV_PYTHON_PREFERENCE=only-managed`) — required because system Python 3.10 on most Linux boxes has no dev headers (`Python.h`), which breaks triton's gcc JIT compile
+- Creates `.venv_pro6000` and installs the pinned stack (torch 2.9.1, sglang 0.5.10.post1, rest) with `--prerelease=allow` (sglang's metadata hard-depends on `flash-attn-4==4.0.0b4`, a pre-release)
+- Detects `CUDA_HOME` from your shell env or `which nvcc`, sets `LIBRARY_PATH=$CUDA_HOME/lib64/stubs` and `CPATH=$CUDA_HOME/include` for triton's gcc JIT step
+- Auto-wipes `autoresearch_frozen/.venv/` if it was built against system Python (detects via `readlink -f .venv/bin/python`)
+- Clones `autoresearch/` if missing and copies `train_sdpa.py` → `autoresearch/train.py`
+- Picks the 2 least-used GPUs, launches SGLang on one and `main.py` on the other
+
+**Run the ERL pipeline too** (optional, uses the remaining 6 GPUs):
 ```bash
-sbatch run_pro6000.sh                       # frozen pipeline (2× Pro 6000)
-sbatch erl_pipeline/run_erl_pro6000.sh      # ERL pipeline (8× Pro 6000)
+bash erl_pipeline/run_erl_pro6000.sh
 ```
-`train_sdpa.py` at the scaffold root is auto-copied over
-`autoresearch/train.py` on every Pro 6000 run, so source stays in sync.
+
+`train_sdpa.py` at the scaffold root is auto-copied over `autoresearch/train.py` on every Pro 6000 run, so source stays in sync. No `flash-attn-4` used at runtime — the `--attention-backend triton` flag keeps SGLang off the FA4 codepath entirely, and `train_sdpa.py` uses PyTorch SDPA with an explicit causal + left-only sliding window mask.
 
 ### What both targets do automatically
 
@@ -258,6 +283,20 @@ if missing.
 - **HuggingFace cache**: Model weights (~18GB) are cached at `$HF_HOME`. Set this to blue storage (B200) or a scratch filesystem (Pro 6000) to avoid filling home-directory quota.
 - **Memory**: 64 GB system RAM required. 32 GB causes OOM during model weight loading.
 - **`torch.compile` on SM 12.0**: PyTorch 2.9.1 has Blackwell support but Inductor had early edge cases for SM 12.0. If `adamw_step_fused` / `muon_step_fused` fail to compile on Pro 6000, comment out the `@torch.compile` decorators in `train_sdpa.py`.
+
+#### Pro 6000 specific (learned 2026-04-10)
+
+The Pro 6000 box typically ships with **only** the NVIDIA driver — no CUDA toolkit, no `python3.10-dev` headers, no `module load`. Setting up the scaffold means manually providing each of the pieces that HiPerGator's modules + conda give you for free. Symptoms you'll see if any is missing:
+
+| Error at runtime | Root cause | Fix |
+|---|---|---|
+| `AssertionError` in `deep_gemm/__init__.py` during SGLang startup: `assert cuda_home is not None` | `CUDA_HOME` is unset and `nvcc` is not on `PATH` | Install CUDA 12.8 toolkit to `$HOME/cuda-12.8` and export `CUDA_HOME` + `PATH` + `LD_LIBRARY_PATH` (see Target B setup above) |
+| `gcc ... returned non-zero exit status 1` inside `triton/runtime/build.py`, stderr swallowed by SGLang | gcc can't find `libcuda.so` (driver only ships `libcuda.so.1`), or can't find `cuda.h`, or can't find `Python.h` | `run_pro6000.sh` now auto-sets `LIBRARY_PATH=$CUDA_HOME/lib64/stubs` (for `-lcuda`) and `CPATH=$CUDA_HOME/include` (for `cuda.h`). `Python.h` comes from the uv-managed standalone Python — `UV_PYTHON_PREFERENCE=only-managed` in the script ensures this |
+| `uv pip install --prerelease=allow` required because of `flash-attn-4==4.0.0b4` | `sglang==0.5.10.post1`'s metadata hard-depends on `flash-attn-4` pre-release | Already handled in `run_pro6000.sh`. FA4 installs but is never loaded — `--attention-backend triton` keeps SGLang off the FA4 codepath |
+| `autoresearch_frozen/.venv/` built against system Python keeps getting `Python.h: No such file` | The `.venv` was created once against system Python and persists across runs | `run_pro6000.sh` auto-detects and wipes this venv via `readlink -f .venv/bin/python`; `uv run train.py` recreates it against uv-managed Python on next launch |
+| ERL worker copies eating `/blue/` quota at ~15 GB each | `rl_eval.py:create_worker_repo` used to clone `.venv/` for every worker | Fixed: workers now symlink the parent's `.venv` instead of copying it. See `rl_eval.py` |
+| Pro 6000 cluster (`itml-1`) is not SLURM | `#SBATCH` directives are shell comments under bash. Scripts auto-pick the 2 least-used GPUs via `nvidia-smi --query-gpu=memory.used` | No action needed; just run with `bash run_pro6000.sh` (not `sbatch`) |
+| `/blue/buyuheng` at 4 TB group quota, writes fail with `EDQUOT` (errno 122) | Group quota is shared; even if you're only using ~858 GB of your quota, the **group** quota is what the filesystem enforces | Delete old worker copies, old LoRA checkpoints, trim HF cache. Long-term: PI opens a ticket with UF RC for more quota |
 
 ### Environment variables (set in `run.sh`)
 

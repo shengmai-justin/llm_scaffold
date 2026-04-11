@@ -28,7 +28,9 @@ PROJ_DIR="/blue/buyuheng/li_an.ucsb/proj_yepeng"
 CONDA_ENV="${PROJ_DIR}/envs/myenv"
 SCAFFOLD_DIR="${PROJ_DIR}/llm_scaffold_rl/llm_scaffold"
 SOURCE_REPO="${SCAFFOLD_DIR}/autoresearch"
-ERL_REPO="${SCAFFOLD_DIR}/autoresearch_erl"
+# Namespaced by --adv-type so TTT runs don't share the working repo
+# (and therefore the worker dirs) with the default GRPO runs.
+ERL_REPO="${SCAFFOLD_DIR}/autoresearch_erl_ttt"
 
 cd "${SCAFFOLD_DIR}/erl_pipeline"
 
