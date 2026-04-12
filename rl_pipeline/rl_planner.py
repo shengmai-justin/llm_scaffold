@@ -34,10 +34,7 @@ def propose_experiment_rl(
         agent_state["repo_path"], agent_state["best_val_bpb"]
     )
     if error_context:
-        user_msg += (
-            f"\n\nPrevious edit attempt failed: {error_context}\n"
-            f"Please propose a corrected experiment."
-        )
+        user_msg += f"\n\n{error_context}"
 
     messages = [
         {"role": "system", "content": system_msg},

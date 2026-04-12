@@ -86,12 +86,11 @@ def build_reflection_context(batch_feedback: str, reflection_text: str) -> str:
     """Build the context string appended to attempt2 proposal prompts.
 
     This is passed as error_context to propose_experiment_rl, so the model
-    sees the batch results + reflection before proposing its second attempt.
+    sees the reflection before proposing its second attempt.  The raw
+    batch_feedback is omitted — the reflection already distills it.
     """
     return (
-        f"--- Batch results from first attempts ---\n"
-        f"{batch_feedback}\n\n"
-        f"--- Your reflection ---\n"
+        f"--- Reflection on first attempts ---\n"
         f"{reflection_text}\n\n"
-        f"Based on the batch results and your reflection, propose an improved experiment."
+        f"Based on the reflection above, propose an improved experiment."
     )

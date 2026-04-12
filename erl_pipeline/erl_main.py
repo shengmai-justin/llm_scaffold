@@ -477,9 +477,10 @@ def main():
                     print(f"  *** NEW BEST: {best_bpb:.6f} (from {tag}) ***")
                     Path(os.path.join(args.log_dir, "best_train.py")).write_text(best_code)
 
-        # Log rollouts (compare against pre-step best, not post-update)
-        for g, ep in enumerate(episodes):
-            for tag, r in [("attempt1", ep.attempt1_rollout), ("attempt2", ep.attempt2_rollout)]:
+        # Log rollouts by phase (all attempt1 first, then all attempt2)
+        for tag in ("attempt1", "attempt2"):
+            for g, ep in enumerate(episodes):
+                r = ep.attempt1_rollout if tag == "attempt1" else ep.attempt2_rollout
                 if r is None:
                     continue
                 log_status = r.status
