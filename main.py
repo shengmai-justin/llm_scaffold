@@ -18,7 +18,7 @@ import results
 SCAFFOLD_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_REPO_PATH = os.path.join(SCAFFOLD_DIR, "autoresearch_frozen")
 DEFAULT_SOURCE_REPO = os.path.join(SCAFFOLD_DIR, "autoresearch")
-TRAIN_TIMEOUT = 600  # seconds (5 min budget + startup/compilation overhead)
+TRAIN_TIMEOUT = 900  # seconds (5 min budget + startup/compilation overhead)
 
 
 # ---------------------------------------------------------------------------

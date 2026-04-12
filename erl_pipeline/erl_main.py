@@ -35,7 +35,7 @@ from erl_feedback import build_batch_feedback
 from erl_reflect import generate_batch_reflection, build_reflection_context
 from erl_trainer import erl_train_step
 
-TRAIN_TIMEOUT = 600
+TRAIN_TIMEOUT = 900
 
 
 # ---------------------------------------------------------------------------

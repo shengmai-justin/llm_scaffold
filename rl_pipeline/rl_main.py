@@ -28,7 +28,7 @@ from rl_planner import propose_experiment_rl
 from rl_sampler import State, PUCTSampler
 from rl_trainer import compute_reward, compute_entropic_advantages, train_step
 from rl_types import Rollout
-TRAIN_TIMEOUT = 600
+TRAIN_TIMEOUT = 900
 
 
 # ---------------------------------------------------------------------------
