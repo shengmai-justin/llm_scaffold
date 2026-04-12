@@ -84,4 +84,5 @@ python erl_main.py \
     --adv-type ttt \
     --log-dir ./erl_log_ttt
 
-echo "Finished. $(date)"
+echo "Python exited at $(date). Allocation held — rerun or scancel to release."
+sleep infinity

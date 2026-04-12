@@ -77,4 +77,5 @@ python erl_main.py \
     --attn-impl sdpa \
     --log-dir ./erl_log
 
-echo "Finished. $(date)"
+echo "Python exited at $(date). Allocation held — rerun or scancel to release."
+sleep infinity
