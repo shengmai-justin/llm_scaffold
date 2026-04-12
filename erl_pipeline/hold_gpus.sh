@@ -6,7 +6,7 @@
 #SBATCH --mem=100gb
 #SBATCH --time=24:00:00
 #SBATCH --partition=hpg-b200
-#SBATCH --gpus=3
+#SBATCH --gpus=4
 
 # Hold GPU allocation for interactive use.
 # SSH into the node and run your scripts manually.

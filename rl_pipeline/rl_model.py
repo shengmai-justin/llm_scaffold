@@ -18,12 +18,17 @@ from peft import get_peft_model, LoraConfig, TaskType, PeftModel
 def load_model(
     model_dir: str,
     device: str = "cuda:0",
+    model_gpus: list[int] | None = None,
     lora_rank: int = 32,
     lora_alpha: int = 64,
     lora_path: str | None = None,
     attn_impl: str = "sdpa",
 ) -> tuple:
     """Load base model + LoRA adapter. Returns (model, tokenizer).
+
+    If model_gpus is given (e.g. [0, 1]), the model is sharded across
+    those GPUs via device_map="auto" + max_memory.  Otherwise falls back
+    to the single-device path using `device`.
 
     If lora_path is given, loads an existing adapter from disk.
     Otherwise creates a fresh LoRA adapter.
@@ -34,12 +39,22 @@ def load_model(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_dir,
-        dtype=torch.bfloat16,
-        device_map=device,
-        attn_implementation=attn_impl,
-    )
+    if model_gpus and len(model_gpus) > 1:
+        max_memory = {g: "170GiB" for g in model_gpus}
+        model = AutoModelForCausalLM.from_pretrained(
+            model_dir,
+            dtype=torch.bfloat16,
+            device_map="auto",
+            max_memory=max_memory,
+            attn_implementation=attn_impl,
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_dir,
+            dtype=torch.bfloat16,
+            device_map=device,
+            attn_implementation=attn_impl,
+        )
 
     if lora_path is not None:
         model = PeftModel.from_pretrained(model, lora_path)
@@ -58,6 +73,10 @@ def load_model(
 
     model.gradient_checkpointing_enable()
     model.print_trainable_parameters()
+
+    # Store the input device for callers that need to place tensors.
+    # With device_map across multiple GPUs, model.device may not exist.
+    model.input_device = next(model.parameters()).device
 
     return model, tokenizer
 
@@ -89,7 +108,7 @@ def generate_with_logprobs(
         - logprobs: per-token logprobs for response tokens only (1D, len = num_new)
         - prompt_len: number of prompt tokens
     """
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.input_device)
     prompt_len = inputs["input_ids"].shape[1]
 
     outputs = model.generate(
@@ -156,7 +175,7 @@ def compute_response_logprobs(
     logits only for response tokens with grad. Saves ~10x memory
     vs computing logits for all positions.
     """
-    input_ids = full_ids.unsqueeze(0).to(model.device)
+    input_ids = full_ids.unsqueeze(0).to(model.input_device)
     past_kv, last_logit = _prompt_forward(model, input_ids, prompt_len)
     return _response_logprobs(model, input_ids, prompt_len, past_kv, last_logit, temperature)
 
@@ -178,7 +197,7 @@ def compute_base_logprobs(
     """
     model.disable_adapter_layers()
     try:
-        input_ids = full_ids.unsqueeze(0).to(model.device)
+        input_ids = full_ids.unsqueeze(0).to(model.input_device)
         past_kv, last_logit = _prompt_forward(model, input_ids, prompt_len)
         return _response_logprobs(model, input_ids, prompt_len, past_kv, last_logit, temperature)
     finally:

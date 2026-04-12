@@ -200,7 +200,9 @@ def main():
     parser.add_argument("--repo-path", default=os.path.join(SCAFFOLD_DIR, "autoresearch_rl"))
     parser.add_argument("--source-repo", default=os.path.join(SCAFFOLD_DIR, "autoresearch"))
     parser.add_argument("--model-dir", default="Qwen/Qwen3.5-9B")
-    parser.add_argument("--model-gpu", type=int, default=0)
+    parser.add_argument("--model-gpu", type=int, default=0, help="(deprecated, use --model-gpus)")
+    parser.add_argument("--model-gpus", type=str, default="",
+                        help="Comma-separated GPU IDs for model (e.g. '0,1' for 2-GPU sharding)")
     parser.add_argument("--eval-gpus", type=str, default="")
     parser.add_argument("--workers-per-gpu", type=int, default=1)
     parser.add_argument("--num-steps", type=int, default=50)
@@ -225,6 +227,12 @@ def main():
     repo_path = os.path.abspath(args.repo_path)
     train_path = os.path.join(repo_path, "train.py")
     os.makedirs(args.log_dir, exist_ok=True)
+
+    # Parse model GPUs: --model-gpus "0,1" takes priority over --model-gpu 0
+    if args.model_gpus:
+        model_gpu_ids = [int(g) for g in args.model_gpus.split(",")]
+    else:
+        model_gpu_ids = [args.model_gpu]
 
     parallel_mode = bool(args.eval_gpus)
 
@@ -252,16 +260,24 @@ def main():
         expanded = [g for g in eval_gpu_ids for _ in range(args.workers_per_gpu)]
         workers = [EvalWorker.remote(gpu, repo_path, i, args.gpu_mem_limit_mb)
                    for i, gpu in enumerate(expanded)]
-        print(f"Parallel mode: model GPU {args.model_gpu}, eval GPUs {eval_gpu_ids}")
+        print(f"Parallel mode: model GPUs {model_gpu_ids}, eval GPUs {eval_gpu_ids}")
 
     # Load model
-    device = f"cuda:{args.model_gpu}"
-    print(f"Loading model {args.model_dir} on {device}...")
-    model, tokenizer = load_model(
-        args.model_dir, device=device,
-        lora_rank=args.lora_rank, lora_alpha=args.lora_alpha,
-        attn_impl=args.attn_impl,
-    )
+    if len(model_gpu_ids) > 1:
+        print(f"Loading model {args.model_dir} sharded across GPUs {model_gpu_ids}...")
+        model, tokenizer = load_model(
+            args.model_dir, model_gpus=model_gpu_ids,
+            lora_rank=args.lora_rank, lora_alpha=args.lora_alpha,
+            attn_impl=args.attn_impl,
+        )
+    else:
+        device = f"cuda:{model_gpu_ids[0]}"
+        print(f"Loading model {args.model_dir} on {device}...")
+        model, tokenizer = load_model(
+            args.model_dir, device=device,
+            lora_rank=args.lora_rank, lora_alpha=args.lora_alpha,
+            attn_impl=args.attn_impl,
+        )
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
         lr=args.lr, betas=(0.9, 0.95), eps=1e-8,

@@ -175,13 +175,13 @@ def _grpo_loss_from_tensors(
     all_ratios: list, all_kls: list,
 ) -> dict:
     """GRPO loss from raw tensors (used for both rollouts and reflection)."""
-    old_lp = old_logprobs.to(model.device)
+    old_lp = old_logprobs.to(model.input_device)
     new_lp = compute_response_logprobs(model, full_ids, prompt_len, temperature=temperature)
 
     ratio = torch.exp(new_lp - old_lp)
     all_ratios.append(ratio.detach().cpu())
 
-    shaped_adv = torch.tensor(advantage, device=model.device)
+    shaped_adv = torch.tensor(advantage, device=model.input_device)
     if kl_coef > 0:
         base_lp = compute_base_logprobs(model, full_ids, prompt_len, temperature=temperature)
         kl_per_token = new_lp - base_lp

@@ -118,7 +118,7 @@ def train_step(
         alloc = torch.cuda.memory_allocated() / 1024**3
         print(f"    [GPU] train rollout {ri}: before forward  alloc={alloc:.1f}GB  tokens={rollout.full_ids.shape[0] - rollout.prompt_len}")
 
-        old_lp = rollout.old_logprobs.to(model.device)
+        old_lp = rollout.old_logprobs.to(model.input_device)
         new_lp = compute_response_logprobs(
             model, rollout.full_ids, rollout.prompt_len,
             temperature=temperature,
@@ -128,7 +128,7 @@ def train_step(
         all_ratios.append(ratio.detach().cpu())
 
         # KL penalty folded into advantage (per-token)
-        shaped_adv = adv.to(model.device)
+        shaped_adv = adv.to(model.input_device)
         if kl_coef > 0:
             base_lp = compute_base_logprobs(
                 model, rollout.full_ids, rollout.prompt_len,

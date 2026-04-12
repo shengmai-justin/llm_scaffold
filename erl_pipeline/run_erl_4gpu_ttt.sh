@@ -6,7 +6,7 @@
 #SBATCH --mem=100gb
 #SBATCH --time=12:00:00
 #SBATCH --partition=hpg-b200
-#SBATCH --gpus=3
+#SBATCH --gpus=4
 
 # ── Configuration ─────────────────────────────────────────────
 # ERL with TTT-Discover entropic LOO advantages for attempt1 / attempt2
@@ -14,8 +14,8 @@
 # computation for attempts is swapped from GRPO to TTT entropic).
 MODEL="Qwen/Qwen3.5-9B"
 NUM_STEPS=100
-MODEL_GPU=0
-EVAL_GPUS="1,2"
+MODEL_GPUS="0,1"
+EVAL_GPUS="2,3"
 # batch_size=4: 4 attempt1 + 4 attempt2 = 8 evals per step (all parallel on 4 workers)
 BATCH_SIZE=4
 WORKERS_PER_GPU=2
@@ -56,7 +56,7 @@ echo "Job ID:    $SLURM_JOB_ID"
 echo "Node:      $(hostname)"
 echo "GPUs:      $(nvidia-smi -L 2>/dev/null | wc -l)"
 echo "Model:     $MODEL"
-echo "Mode:      ERL 3-GPU TTT-adv (model=GPU0, eval=GPU1-2, 2 workers/GPU, 88GB cap)"
+echo "Mode:      ERL 4-GPU TTT-adv (model=GPU0-1, eval=GPU2-3, 2 workers/GPU, 88GB cap)"
 echo "Advantage: ttt (entropic LOO with adaptive beta)"
 echo "Workers:   ${WORKERS_PER_GPU}/GPU x 2 eval GPUs = 4 workers, batch_size=${BATCH_SIZE}"
 echo "Started:   $(date)"
@@ -68,7 +68,7 @@ python erl_main.py \
     --repo-path "$ERL_REPO" \
     --source-repo "$SOURCE_REPO" \
     --model-dir "$MODEL" \
-    --model-gpu "$MODEL_GPU" \
+    --model-gpus "$MODEL_GPUS" \
     --eval-gpus "$EVAL_GPUS" \
     --workers-per-gpu "$WORKERS_PER_GPU" \
     --gpu-mem-limit-mb "$GPU_MEM_LIMIT_MB" \
