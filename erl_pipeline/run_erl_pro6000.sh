@@ -32,7 +32,7 @@
 set -euo pipefail
 
 # ── Paths (override via env vars if layout differs) ──────────
-PROJ_DIR="${PROJ_DIR:-$HOME/autoresearch_pro6000}"
+PROJ_DIR="${PROJ_DIR:-$HOME/auto_proj}"
 SCAFFOLD_DIR="${SCAFFOLD_DIR:-$PROJ_DIR/llm_scaffold}"
 SOURCE_REPO="${SOURCE_REPO:-$SCAFFOLD_DIR/autoresearch}"
 ERL_REPO="${ERL_REPO:-$SCAFFOLD_DIR/autoresearch_erl}"
@@ -41,11 +41,8 @@ VENV_DIR="${VENV_DIR:-$SCAFFOLD_DIR/.venv_pro6000}"
 # ── ERL configuration ────────────────────────────────────────
 MODEL="Qwen/Qwen3.5-9B"
 NUM_STEPS=50
-MODEL_GPUS="2,3"
-EVAL_GPUS="4,5,6,7"
-# batch_size=4: 4 attempt1 + 4 attempt2 = 8 evals per step, 1 wave per phase on 4 GPUs
-# GPUs 0,1 reserved for the frozen pipeline (SGLang + experiment loop)
-BATCH_SIZE=4
+# GPU assignment is auto-detected below (least-used GPUs).
+BATCH_SIZE=3
 WORKERS_PER_GPU=1
 KL_COEF=0.1
 LR=4e-5
@@ -118,8 +115,21 @@ echo "Job ID:    ${SLURM_JOB_ID:-local}"
 echo "Node:      $(hostname)"
 echo "GPUs:      $(nvidia-smi -L 2>/dev/null | wc -l)"
 echo "Model:     $MODEL"
-echo "Mode:      ERL Pro 6000 6-GPU (model=GPU2-3, eval=GPU4-7, 1 worker/GPU, no memlimit)"
-echo "Workers:   ${WORKERS_PER_GPU}/GPU x 4 eval GPUs = 4 workers, batch_size=${BATCH_SIZE}"
+# ── Auto-pick 6 least-used GPUs (no SLURM on this cluster) ───
+# First 3 = model (sharded), remaining 3 = eval workers.
+mapfile -t FREE_GPUS < <(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \
+    | sort -t',' -k2 -n | awk -F',' '{gsub(/ /,""); print $1}')
+NEED=6
+if [ "${#FREE_GPUS[@]}" -lt "$NEED" ]; then
+    echo "ERROR: need $NEED free GPUs, found ${#FREE_GPUS[@]}"
+    nvidia-smi --query-gpu=index,memory.used --format=csv
+    exit 1
+fi
+MODEL_GPUS="${FREE_GPUS[0]},${FREE_GPUS[1]},${FREE_GPUS[2]}"
+EVAL_GPUS="${FREE_GPUS[3]},${FREE_GPUS[4]},${FREE_GPUS[5]}"
+
+echo "Mode:      ERL Pro 6000 6-GPU (model=GPU${MODEL_GPUS}, eval=GPU${EVAL_GPUS}, 1 worker/GPU, no memlimit)"
+echo "Workers:   ${WORKERS_PER_GPU}/GPU x 3 eval GPUs = 3 workers, batch_size=${BATCH_SIZE}"
 echo "Started:   $(date)"
 echo "---"
 
