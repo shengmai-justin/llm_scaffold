@@ -119,6 +119,16 @@ def train_step(
         print(f"    [GPU] train rollout {ri}: before forward  alloc={alloc:.1f}GB  tokens={rollout.full_ids.shape[0] - rollout.prompt_len}")
 
         old_lp = rollout.old_logprobs.to(model.input_device)
+
+        # Compute base_lp FIRST (no grad) so its KV cache and intermediates
+        # are freed before the grad-tracked new_lp forward pass begins.
+        base_lp = None
+        if kl_coef > 0:
+            base_lp = compute_base_logprobs(
+                model, rollout.full_ids, rollout.prompt_len,
+                temperature=temperature,
+            )
+
         new_lp = compute_response_logprobs(
             model, rollout.full_ids, rollout.prompt_len,
             temperature=temperature,
@@ -129,11 +139,7 @@ def train_step(
 
         # KL penalty folded into advantage (per-token)
         shaped_adv = adv.to(model.input_device)
-        if kl_coef > 0:
-            base_lp = compute_base_logprobs(
-                model, rollout.full_ids, rollout.prompt_len,
-                temperature=temperature,
-            )
+        if base_lp is not None:
             kl_per_token = new_lp - base_lp
             all_kls.append(kl_per_token.mean().item())
             shaped_adv = shaped_adv - kl_coef * kl_per_token

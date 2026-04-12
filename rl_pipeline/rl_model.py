@@ -145,7 +145,11 @@ def _prompt_forward(model, input_ids, prompt_len):
 
 
 def _response_logprobs(model, input_ids, prompt_len, past_kv, last_logit, temperature):
-    """Forward response tokens with KV cache, return per-token logprobs."""
+    """Forward response tokens with KV cache, return per-token logprobs.
+
+    Uses selective log-softmax: log_softmax(z_i) = z_i / T - logsumexp(z / T)
+    to avoid materializing the full (seq_len, vocab_size) softmax tensor.
+    """
     out = model(
         input_ids=input_ids[:, prompt_len:],
         past_key_values=past_kv,
@@ -155,12 +159,13 @@ def _response_logprobs(model, input_ids, prompt_len, past_kv, last_logit, temper
     response_logits = torch.cat([last_logit, out.logits[:, :-1, :]], dim=1)[0]
     response_ids = input_ids[0, prompt_len:]
 
-    if temperature > 0:
-        log_probs = torch.log_softmax(response_logits / temperature, dim=-1)
-    else:
-        log_probs = torch.log_softmax(response_logits, dim=-1)
-
-    return log_probs.gather(1, response_ids.unsqueeze(1)).squeeze(1)
+    t = temperature if temperature > 0 else 1.0
+    scaled_logits = response_logits / t
+    # Gather only the target token's logit — shape (seq_len,)
+    target_logits = scaled_logits.gather(1, response_ids.unsqueeze(1)).squeeze(1)
+    # logsumexp across vocab — shape (seq_len,)
+    lse = torch.logsumexp(scaled_logits, dim=-1)
+    return target_logits - lse
 
 
 def compute_response_logprobs(

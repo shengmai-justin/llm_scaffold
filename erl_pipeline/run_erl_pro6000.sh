@@ -26,7 +26,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128gb
 #SBATCH --time=12:00:00
-#SBATCH --gpus=8
+#SBATCH --gpus=6
 # #SBATCH --partition=<your-partition>    # uncomment + set if your cluster requires it
 
 set -euo pipefail
@@ -41,10 +41,11 @@ VENV_DIR="${VENV_DIR:-$SCAFFOLD_DIR/.venv_pro6000}"
 # ── ERL configuration ────────────────────────────────────────
 MODEL="Qwen/Qwen3.5-9B"
 NUM_STEPS=50
-MODEL_GPU=0
-EVAL_GPUS="1,2,3,4,5,6,7"
-# batch_size=7: 7 attempt1 + 7 attempt2 = 14 evals per step, 1 wave per phase on 7 GPUs
-BATCH_SIZE=7
+MODEL_GPUS="2,3"
+EVAL_GPUS="4,5,6,7"
+# batch_size=4: 4 attempt1 + 4 attempt2 = 8 evals per step, 1 wave per phase on 4 GPUs
+# GPUs 0,1 reserved for the frozen pipeline (SGLang + experiment loop)
+BATCH_SIZE=4
 WORKERS_PER_GPU=1
 KL_COEF=0.1
 LR=4e-5
@@ -117,8 +118,8 @@ echo "Job ID:    ${SLURM_JOB_ID:-local}"
 echo "Node:      $(hostname)"
 echo "GPUs:      $(nvidia-smi -L 2>/dev/null | wc -l)"
 echo "Model:     $MODEL"
-echo "Mode:      ERL Pro 6000 8-GPU (model=GPU0, eval=GPU1-7, 1 worker/GPU, no memlimit)"
-echo "Workers:   ${WORKERS_PER_GPU}/GPU x 7 eval GPUs = 7 workers, batch_size=${BATCH_SIZE}"
+echo "Mode:      ERL Pro 6000 6-GPU (model=GPU2-3, eval=GPU4-7, 1 worker/GPU, no memlimit)"
+echo "Workers:   ${WORKERS_PER_GPU}/GPU x 4 eval GPUs = 4 workers, batch_size=${BATCH_SIZE}"
 echo "Started:   $(date)"
 echo "---"
 
@@ -129,7 +130,7 @@ python erl_main.py \
     --repo-path "$ERL_REPO" \
     --source-repo "$SOURCE_REPO" \
     --model-dir "$MODEL" \
-    --model-gpu "$MODEL_GPU" \
+    --model-gpus "$MODEL_GPUS" \
     --eval-gpus "$EVAL_GPUS" \
     --workers-per-gpu "$WORKERS_PER_GPU" \
     --num-steps "$NUM_STEPS" \

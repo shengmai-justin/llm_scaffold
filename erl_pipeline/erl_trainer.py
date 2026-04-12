@@ -176,14 +176,20 @@ def _grpo_loss_from_tensors(
 ) -> dict:
     """GRPO loss from raw tensors (used for both rollouts and reflection)."""
     old_lp = old_logprobs.to(model.input_device)
+
+    # Compute base_lp FIRST (no grad) so its KV cache and intermediates are
+    # freed before the grad-tracked new_lp forward pass begins.
+    base_lp = None
+    if kl_coef > 0:
+        base_lp = compute_base_logprobs(model, full_ids, prompt_len, temperature=temperature)
+
     new_lp = compute_response_logprobs(model, full_ids, prompt_len, temperature=temperature)
 
     ratio = torch.exp(new_lp - old_lp)
     all_ratios.append(ratio.detach().cpu())
 
     shaped_adv = torch.tensor(advantage, device=model.input_device)
-    if kl_coef > 0:
-        base_lp = compute_base_logprobs(model, full_ids, prompt_len, temperature=temperature)
+    if base_lp is not None:
         kl_per_token = new_lp - base_lp
         all_kls.append(kl_per_token.mean().item())
         shaped_adv = shaped_adv - kl_coef * kl_per_token
