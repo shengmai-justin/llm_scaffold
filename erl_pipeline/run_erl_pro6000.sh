@@ -109,6 +109,9 @@ export HF_HOME="${HF_HOME:-$PROJ_DIR/.cache/huggingface}"
 # Same reason as the B200 variant: ERL's phased loop accumulates
 # reserved-but-unused blocks across generation / reflection / train.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# Separate Ray temp dir from the frozen pipeline to avoid filling /tmp/ray.
+export RAY_TMPDIR="${PROJ_DIR}/ray_tmp_erl"
+mkdir -p "$RAY_TMPDIR"
 
 # ── Info ─────────────────────────────────────────────────────
 echo "Job ID:    ${SLURM_JOB_ID:-local}"
@@ -150,7 +153,7 @@ python erl_main.py \
     --lora-rank "$LORA_RANK" \
     --lora-alpha "$LORA_ALPHA" \
     --temperature 0.7 \
-    --max-new-tokens 16384 \
+    --max-new-tokens 32768 \
     --attn-impl sdpa \
     --log-dir ./erl_log_pro6000
 
