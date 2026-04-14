@@ -68,9 +68,9 @@ Two supported hardware targets:
 | Learning rate | 4e-5 |
 | KL coefficient | 0.1 |
 | Temperature | 0.7 |
-| Max new tokens | 8192 (small B200) / 16384 (memlimit + Pro 6000) |
+| Max new tokens | 8192 (small B200) / 32768 (memlimit + TTT + Pro 6000) |
 | Attention | SDPA (all variants) |
-| Eval timeout | 600s per `train.py` run |
+| Eval timeout | 900s per `train.py` run (5-min budget + compile/startup overhead) |
 | Reward | `1/val_bpb` (success) or `0.0` (crash) |
 | ERL attempt advantages | `--adv-type grpo` (default) or `--adv-type ttt` (entropic LOO) |
 | B200 modules | gcc/14.2.0, cuda/12.8.1, conda |
@@ -106,31 +106,36 @@ Two supported hardware targets:
 | Time limit | 10 days | 4 days |
 | Submit | `sbatch rl_pipeline/run_rl.sh` | `sbatch erl_pipeline/run_erl.sh` |
 
-### Memory-limited (3 GPUs, 2 workers/GPU, B200)
+### Memory-limited (4 GPUs, 2 workers/GPU, B200)
+
+ERL variants shard the model across 2 GPUs (via `--model-gpus "0,1"` + HuggingFace `device_map`) to halve per-GPU activation memory during training. Eval workers run on the other 2 GPUs.
 
 | | RL | ERL |
 |---|---|---|
 | Script | `rl_pipeline/run_rl_4gpu_memlimit.sh` | `erl_pipeline/run_erl_4gpu_memlimit.sh` |
-| SBATCH GPUs | 3 | 3 |
-| Model GPU | 0 | 0 |
-| Eval GPUs | 1,2 | 1,2 |
+| SBATCH GPUs | 3 | 4 |
+| Model GPUs | 0 (single) | 0,1 (sharded via device_map) |
+| Eval GPUs | 1,2 | 2,3 |
 | Workers/GPU | 2 | 2 |
 | GPU mem limit | 88000 MB per worker | 88000 MB per worker |
 | Batch size | 8 | 4 |
-| Max new tokens | 8192 | 16384 |
+| Max new tokens | 8192 | 32768 |
 | Steps | 100 | 100 |
 | Time limit | 12 hours | 12 hours |
 | Submit | `sbatch rl_pipeline/run_rl_4gpu_memlimit.sh` | `sbatch erl_pipeline/run_erl_4gpu_memlimit.sh` |
 
-### ERL TTT-advantages variant (3 GPUs, B200)
+### ERL TTT-advantages variant (4 GPUs, B200)
 
 Same layout as `run_erl_4gpu_memlimit.sh` but passes `--adv-type ttt` to swap attempt1 / attempt2 advantages from GRPO to TTT-Discover entropic LOO. Reflection + distillation signals unchanged.
 
 | Script | `erl_pipeline/run_erl_4gpu_ttt.sh` |
 |---|---|
-| SBATCH GPUs | 3 |
+| SBATCH GPUs | 4 |
+| Model GPUs | 0,1 (sharded) |
+| Eval GPUs | 2,3 |
 | Workers/GPU | 2 |
 | Batch size | 4 |
+| Max new tokens | 32768 |
 | Adv type | `ttt` |
 | Working repo | `autoresearch_erl_ttt/` (isolated from GRPO `autoresearch_erl/`) |
 | Worker dirs | `autoresearch_erl_ttt_worker_*/` |
@@ -139,23 +144,28 @@ Same layout as `run_erl_4gpu_memlimit.sh` but passes `--adv-type ttt` to swap at
 
 TTT and GRPO runs can coexist on the same filesystem without interfering — each variant has its own working repo, worker dirs, and log dir.
 
-### Pro 6000 Blackwell (8 GPUs)
+### Pro 6000 Blackwell
+
+Frozen pipeline takes 2 GPUs (SGLang + main.py). ERL runs on the remaining 6, auto-detected. The model is sharded across 3 GPUs (96 GB each is tight for 9B training on long sequences), eval runs on the other 3.
 
 | | Frozen | ERL |
 |---|---|---|
 | Script | `run_pro6000.sh` | `erl_pipeline/run_erl_pro6000.sh` |
-| SBATCH GPUs | 2 | 8 |
-| Model GPU | 0 (SGLang) | 0 |
-| Experiment / eval GPUs | 1 (main.py) | 1,2,3,4,5,6,7 |
+| SBATCH GPUs | 2 | 6 |
+| Model GPUs | 0 (SGLang, auto-picked) | 0,1,2 sharded (auto-picked, least-used 3) |
+| Experiment / eval GPUs | 1 (main.py, auto-picked) | 3,4,5 (auto-picked, next 3) |
 | Workers/GPU | — | 1 |
-| GPU mem limit | none (single SGLang + single main.py) | none (96 GB is plenty) |
-| Batch size | — | 7 |
+| GPU mem limit | none (single SGLang + single main.py) | none (96 GB per worker is plenty) |
+| Batch size | — | 3 (matches 3 eval workers, 1 wave per phase) |
+| Max new tokens | — | 32768 |
 | Steps | unlimited | 50 |
 | Env setup | uv venv + pinned pip install, no modules | same |
 | Attention backend | SGLang `--attention-backend triton` | SDPA (`--attn-impl sdpa`) |
 | train.py variant | `train_sdpa.py` auto-installed into source | same |
 | Time limit | 12 hours | 12 hours |
-| Submit | `sbatch run_pro6000.sh` | `sbatch erl_pipeline/run_erl_pro6000.sh` |
+| Submit | `bash run_pro6000.sh` | `bash erl_pipeline/run_erl_pro6000.sh` |
+
+**GPU auto-detection:** Both scripts pick the N least-used GPUs via `nvidia-smi --query-gpu=memory.used`. The frozen pipeline picks 2, ERL picks 6 (first 3 for model, next 3 for eval). If the frozen pipeline is running, ERL automatically avoids its GPUs. Since this cluster has no SLURM, `#SBATCH` directives are inert comments and scripts are launched directly with `bash`.
 
 ### Memory-limited test (3 GPUs, quick validation)
 
@@ -217,9 +227,33 @@ RL and ERL pipelines are fully isolated and can run simultaneously.
 | Worker venv | symlinked → parent `.venv` | symlinked → parent `.venv` | symlinked → parent `.venv` |
 | Logs | `rl_pipeline/rl_log/` | `erl_pipeline/erl_log/` | `erl_pipeline/erl_log_ttt/` |
 | Results | `rl_pipeline/rl_log/results.tsv` | `erl_pipeline/erl_log/results.tsv` | `erl_pipeline/erl_log_ttt/results.tsv` |
-| Clean | `bash rl_pipeline/clean.sh` | `bash erl_pipeline/clean.sh` | `bash erl_pipeline/clean.sh` (cleans both variants) |
+| Clean | `bash rl_pipeline/clean.sh` | `bash erl_pipeline/clean.sh` | `bash erl_pipeline/clean_ttt.sh` (separate script — TTT-namespaced dirs) |
 
 **Worker venv sharing:** `rl_eval.py:create_worker_repo` copies the repo without `.venv/` and symlinks the worker's `.venv` at the parent's. This drops per-worker disk cost from ~15 GB (full venv clone) to ~20 MB (code only + symlink). Safe because the venv is read-only during training — workers only import from it. Deletion order matters: `clean.sh` wipes worker dirs first (they contain symlinks, not real venv bytes), then the source repo (which owns the real venv).
+
+## Allocation-hold and restart (SLURM)
+
+Each ERL run script ends with `sleep infinity` instead of exiting after python completes. This keeps the SLURM allocation alive even if the training process is killed, so you can SSH in, update code, clean, and rerun without losing your queue slot.
+
+| Script | Purpose |
+|---|---|
+| `erl_pipeline/hold_gpus.sh` | Standalone job that holds a GPU allocation (4 GPUs, 24h) for interactive use. SSH in to use them. |
+| `erl_pipeline/restart_grpo.sh` | Restart ERL-GRPO on an existing allocation: kill python, `git pull`, `clean`, relaunch |
+| `erl_pipeline/restart_ttt.sh` | Restart ERL-TTT on an existing allocation: same flow with TTT-namespaced paths |
+
+**Restart workflow** (after a killed/failed run within a running SLURM job):
+
+```bash
+# Find the node
+squeue -u $(whoami)
+
+# SSH directly to it (NOT srun --overlap — that binds to the main job step,
+# which dies when the run script exits)
+ssh <node>
+
+# Restart — the script handles killing python, cleaning, and relaunching
+bash erl_pipeline/restart_ttt.sh   # or restart_grpo.sh
+```
 
 ## Quick Reference
 
@@ -233,22 +267,25 @@ sbatch erl_pipeline/run_erl_4gpu.sh
 sbatch rl_pipeline/run_rl.sh
 sbatch erl_pipeline/run_erl.sh
 
-# Memory-limited (3 GPUs, 2 workers/GPU)
+# Memory-limited (B200: RL=3 GPUs / ERL=4 GPUs with 2-GPU model sharding)
 sbatch rl_pipeline/run_rl_4gpu_memlimit.sh
 sbatch erl_pipeline/run_erl_4gpu_memlimit.sh
 
-# ERL with TTT-Discover entropic advantages (3 GPUs)
+# ERL with TTT-Discover entropic advantages (4 GPUs, model sharded)
 sbatch erl_pipeline/run_erl_4gpu_ttt.sh
 
 # Frozen (2 GPUs, SGLang + experiment loop)
 sbatch run.sh
 
-# ── Pro 6000 Blackwell ──────────────────────────────────────
-# Frozen (2 GPUs)
-sbatch run_pro6000.sh
+# Hold 4 GPUs for 24h (interactive via ssh)
+sbatch erl_pipeline/hold_gpus.sh
 
-# ERL (8 GPUs, no memlimit)
-sbatch erl_pipeline/run_erl_pro6000.sh
+# ── Pro 6000 Blackwell (no SLURM) ───────────────────────────
+# Frozen (2 GPUs, auto-picked)
+bash run_pro6000.sh
+
+# ERL (6 GPUs, auto-picked — 3 model / 3 eval)
+bash erl_pipeline/run_erl_pro6000.sh
 
 # ── Ops ─────────────────────────────────────────────────────
 # Check job status
@@ -259,6 +296,11 @@ tail -f rl_pipeline/rl_log/run.log
 tail -f erl_pipeline/erl_log/run.log
 
 # Clean up worker repos
-bash rl_pipeline/clean.sh
-bash erl_pipeline/clean.sh
+bash rl_pipeline/clean.sh        # RL pipeline
+bash erl_pipeline/clean.sh       # ERL GRPO
+bash erl_pipeline/clean_ttt.sh   # ERL TTT (separate script)
+
+# Restart on an existing SLURM allocation (SSH directly to node first)
+bash erl_pipeline/restart_grpo.sh
+bash erl_pipeline/restart_ttt.sh
 ```

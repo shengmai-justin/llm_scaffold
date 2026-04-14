@@ -110,7 +110,10 @@ export HF_HOME="${HF_HOME:-$PROJ_DIR/.cache/huggingface}"
 # reserved-but-unused blocks across generation / reflection / train.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # Separate Ray temp dir from the frozen pipeline to avoid filling /tmp/ray.
-export RAY_TMPDIR="${PROJ_DIR}/ray_tmp_erl"
+# Keep the path short — Ray plasma socket is AF_UNIX (107-byte limit) and
+# Ray appends ~70 chars of session_{ts}_{pid}/sockets/plasma_store, so
+# $PROJ_DIR/ray_tmp_erl blows past the limit. /tmp stays well under.
+export RAY_TMPDIR="/tmp/raye_${USER}"
 mkdir -p "$RAY_TMPDIR"
 
 # ── Info ─────────────────────────────────────────────────────
