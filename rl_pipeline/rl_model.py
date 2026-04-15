@@ -92,6 +92,7 @@ def generate_with_logprobs(
     prompt: str,
     max_new_tokens: int = 32768,
     temperature: float = 1.0,
+    think_budget: int | None = None,
 ) -> tuple[str, torch.Tensor, torch.Tensor, int]:
     """Generate a response and collect per-token logprobs.
 
@@ -100,6 +101,11 @@ def generate_with_logprobs(
     use the same code path as new_logprobs during training, so the importance
     sampling ratio is exactly 1.0 for on-policy updates (no bfloat16
     divergence between autoregressive and parallel forward passes).
+
+    If `think_budget` is set, a BudgetThinkingProcessor is attached to
+    force `</think>` once the model has spent that many tokens inside the
+    think block. The processor is NOT applied at logprob recompute time,
+    so old_lp and new_lp stay on-policy (ratio ~ 1.0).
 
     Returns:
         (text, token_ids, logprobs, prompt_len)
@@ -111,13 +117,20 @@ def generate_with_logprobs(
     inputs = tokenizer(prompt, return_tensors="pt").to(model.input_device)
     prompt_len = inputs["input_ids"].shape[1]
 
-    outputs = model.generate(
-        **inputs,
+    gen_kwargs = dict(
         max_new_tokens=max_new_tokens,
         temperature=temperature,
         do_sample=True,
         return_dict_in_generate=True,
     )
+    if think_budget is not None and think_budget > 0:
+        from transformers import LogitsProcessorList
+        from budget_processor import BudgetThinkingProcessor
+        gen_kwargs["logits_processor"] = LogitsProcessorList([
+            BudgetThinkingProcessor(tokenizer, prompt_len, think_budget),
+        ])
+
+    outputs = model.generate(**inputs, **gen_kwargs)
 
     full_ids = outputs.sequences[0].cpu()  # [prompt_len + new_tokens]
     del outputs

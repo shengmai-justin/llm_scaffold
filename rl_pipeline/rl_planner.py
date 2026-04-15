@@ -25,6 +25,7 @@ def propose_experiment_rl(
     temperature: float = 1.0,
     max_new_tokens: int = 32768,
     error_context: str | None = None,
+    think_budget: int | None = None,
 ) -> tuple[dict, Rollout]:
     """Generate a proposal using the local model. Returns (proposal, rollout).
 
@@ -48,6 +49,7 @@ def propose_experiment_rl(
         model, tokenizer, prompt_text,
         max_new_tokens=max_new_tokens,
         temperature=temperature,
+        think_budget=think_budget,
     )
 
     # Strip thinking block. The prompt includes <think>, so the response

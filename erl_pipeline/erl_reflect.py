@@ -44,8 +44,13 @@ def generate_batch_reflection(
     best_val_bpb: float,
     temperature: float = 0.7,
     max_new_tokens: int = 1024,
+    think_budget: int | None = 512,
 ) -> tuple[str, torch.Tensor, torch.Tensor, int]:
     """Generate one reflection for the entire batch of attempt1 results.
+
+    The default `think_budget=512` reserves at least half of the 1024-token
+    response for the reflection text after `</think>` is forced. Pass None
+    to disable budgeting (legacy behavior).
 
     Args:
         batch_feedback: output of build_batch_feedback() — all attempt1 results
@@ -72,6 +77,7 @@ def generate_batch_reflection(
         model, tokenizer, prompt_text,
         max_new_tokens=max_new_tokens,
         temperature=temperature,
+        think_budget=think_budget,
     )
 
     # Strip thinking tags if present

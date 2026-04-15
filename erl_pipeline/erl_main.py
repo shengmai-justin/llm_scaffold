@@ -44,7 +44,7 @@ TRAIN_TIMEOUT = 900
 
 def generate_and_apply(
     model, tokenizer, agent_state, parent_code, train_path,
-    temperature, max_new_tokens, error_context=None,
+    temperature, max_new_tokens, error_context=None, think_budget=None,
 ):
     """Generate proposal, apply edits. Returns (rollout, edited_code, proposal)."""
     state_mod.write_file(train_path, parent_code)
@@ -55,6 +55,7 @@ def generate_and_apply(
             temperature=temperature,
             max_new_tokens=max_new_tokens,
             error_context=error_context,
+            think_budget=think_budget,
         )
     except Exception as e:
         print(f"  Proposal failed: {e}")
@@ -212,7 +213,9 @@ def main():
     parser.add_argument("--lora-rank", type=int, default=32)
     parser.add_argument("--lora-alpha", type=int, default=64)
     parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--max-new-tokens", type=int, default=8192)
+    parser.add_argument("--max-new-tokens", type=int, default=16000)
+    parser.add_argument("--think-budget", type=int, default=6000,
+                        help="Max tokens inside <think>...</think>; force-close beyond. 0 disables.")
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--dr-grpo", action="store_true", help="Use Dr. GRPO (mean-only, no std normalization)")
     parser.add_argument("--adv-type", choices=["grpo", "ttt"], default="grpo",
@@ -340,11 +343,14 @@ def main():
         print("\n  --- Phase 1: First attempts ---")
         a1_refs = []  # (ray_ref, index)
 
+        think_budget = args.think_budget if args.think_budget > 0 else None
+
         for g in range(args.batch_size):
             print(f"\n  [Attempt1 {g+1}/{args.batch_size}]")
             rollout, edited_code, proposal = generate_and_apply(
                 model, tokenizer, agent_state, best_code, train_path,
                 temperature=args.temperature, max_new_tokens=args.max_new_tokens,
+                think_budget=think_budget,
             )
 
             ep = Episode(
@@ -392,11 +398,15 @@ def main():
         print(f"  Batch: {len(episodes)} attempts, "
               f"{sum(1 for a in attempt_summaries if a['val_bpb'] is not None and a['val_bpb'] < best_bpb)} improved")
 
+        # Reflection has a much smaller max_new_tokens (1024 default), so cap
+        # the think portion proportionally — leave at least half for prose.
+        ref_think_budget = min(think_budget, 512) if think_budget else None
         ref_text, ref_ids, ref_lp, ref_plen = generate_batch_reflection(
             model, tokenizer,
             batch_feedback=batch_feedback,
             best_val_bpb=best_bpb,
             temperature=args.temperature,
+            think_budget=ref_think_budget,
         )
         print(f"  Reflection: {ref_text[:120]}...")
 
@@ -412,6 +422,7 @@ def main():
                 model, tokenizer, agent_state, best_code, train_path,
                 temperature=args.temperature, max_new_tokens=args.max_new_tokens,
                 error_context=reflection_ctx,
+                think_budget=think_budget,
             )
 
             ep = episodes[g]
