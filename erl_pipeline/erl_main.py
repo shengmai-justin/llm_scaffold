@@ -65,7 +65,8 @@ def generate_and_apply(
         rollout = Rollout(
             prompt_text="", proposal_text="", full_ids=torch.tensor([]),
             old_logprobs=torch.tensor([]), prompt_len=0,
-            val_bpb=None, status="edit_failed", reward=-1.0,
+            val_bpb=None, status="edit_failed",
+            reward=compute_reward(None, "edit_failed"),
             description=f"proposal_error: {e}",
         )
         return rollout, None, None

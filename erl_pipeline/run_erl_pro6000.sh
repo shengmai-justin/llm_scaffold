@@ -5,7 +5,8 @@
 #   1. No `module load` — this cluster has no HPC modules; Python deps are
 #      installed into a local uv-managed venv instead.
 #   2. No memlimit — each 96 GB Pro 6000 easily fits one train.py eval
-#      worker, and we're running 1 worker/GPU × 7 eval GPUs = 7 workers.
+#      worker. Layout: 4 GPUs for sharded model + 4 for eval workers
+#      (1 worker/GPU × 4 eval GPUs = 4 workers, matched to batch_size=4).
 #   3. No flash-attn-4 / kernels-community install — Pro 6000 (SM 12.0) uses
 #      the SDPA-based train.py (train_sdpa.py in this repo) which has no
 #      CUDA-kernel dependencies beyond PyTorch itself.
@@ -26,7 +27,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128gb
 #SBATCH --time=12:00:00
-#SBATCH --gpus=6
+#SBATCH --gpus=8
 # #SBATCH --partition=<your-partition>    # uncomment + set if your cluster requires it
 
 set -euo pipefail
@@ -40,9 +41,9 @@ VENV_DIR="${VENV_DIR:-$SCAFFOLD_DIR/.venv_pro6000}"
 
 # ── ERL configuration ────────────────────────────────────────
 MODEL="Qwen/Qwen3.5-9B"
-NUM_STEPS=50
+NUM_STEPS=100
 # GPU assignment is auto-detected below (least-used GPUs).
-BATCH_SIZE=3
+BATCH_SIZE=4
 WORKERS_PER_GPU=1
 KL_COEF=0.1
 LR=4e-5
@@ -121,21 +122,21 @@ echo "Job ID:    ${SLURM_JOB_ID:-local}"
 echo "Node:      $(hostname)"
 echo "GPUs:      $(nvidia-smi -L 2>/dev/null | wc -l)"
 echo "Model:     $MODEL"
-# ── Auto-pick 6 least-used GPUs (no SLURM on this cluster) ───
-# First 3 = model (sharded), remaining 3 = eval workers.
+# ── Auto-pick 8 least-used GPUs (no SLURM on this cluster) ───
+# First 4 = model (sharded), remaining 4 = eval workers.
 mapfile -t FREE_GPUS < <(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \
     | sort -t',' -k2 -n | awk -F',' '{gsub(/ /,""); print $1}')
-NEED=6
+NEED=8
 if [ "${#FREE_GPUS[@]}" -lt "$NEED" ]; then
     echo "ERROR: need $NEED free GPUs, found ${#FREE_GPUS[@]}"
     nvidia-smi --query-gpu=index,memory.used --format=csv
     exit 1
 fi
-MODEL_GPUS="${FREE_GPUS[0]},${FREE_GPUS[1]},${FREE_GPUS[2]}"
-EVAL_GPUS="${FREE_GPUS[3]},${FREE_GPUS[4]},${FREE_GPUS[5]}"
+MODEL_GPUS="${FREE_GPUS[0]},${FREE_GPUS[1]},${FREE_GPUS[2]},${FREE_GPUS[3]}"
+EVAL_GPUS="${FREE_GPUS[4]},${FREE_GPUS[5]},${FREE_GPUS[6]},${FREE_GPUS[7]}"
 
-echo "Mode:      ERL Pro 6000 6-GPU (model=GPU${MODEL_GPUS}, eval=GPU${EVAL_GPUS}, 1 worker/GPU, no memlimit)"
-echo "Workers:   ${WORKERS_PER_GPU}/GPU x 3 eval GPUs = 3 workers, batch_size=${BATCH_SIZE}"
+echo "Mode:      ERL Pro 6000 8-GPU (model=GPU${MODEL_GPUS}, eval=GPU${EVAL_GPUS}, 1 worker/GPU, no memlimit)"
+echo "Workers:   ${WORKERS_PER_GPU}/GPU x 4 eval GPUs = 4 workers, batch_size=${BATCH_SIZE}"
 echo "Started:   $(date)"
 echo "---"
 
