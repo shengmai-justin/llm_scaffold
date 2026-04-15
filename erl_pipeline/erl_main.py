@@ -32,6 +32,7 @@ from rl_types import Rollout
 
 from erl_types import Episode, StepReflection
 from erl_feedback import build_batch_feedback
+from erl_history import generate_history_summary
 from erl_reflect import generate_batch_reflection, build_reflection_context
 from erl_trainer import erl_train_step
 
@@ -44,7 +45,8 @@ TRAIN_TIMEOUT = 900
 
 def generate_and_apply(
     model, tokenizer, agent_state, parent_code, train_path,
-    temperature, max_new_tokens, error_context=None, think_budget=None,
+    temperature, max_new_tokens, error_context=None, history_context=None,
+    think_budget=None,
 ):
     """Generate proposal, apply edits. Returns (rollout, edited_code, proposal)."""
     state_mod.write_file(train_path, parent_code)
@@ -55,6 +57,7 @@ def generate_and_apply(
             temperature=temperature,
             max_new_tokens=max_new_tokens,
             error_context=error_context,
+            history_context=history_context,
             think_budget=think_budget,
         )
     except Exception as e:
@@ -339,17 +342,26 @@ def main():
 
         episodes: list[Episode] = []
 
+        # ── Phase 0: Cross-step history summary (one LLM call per step) ──
+        think_budget = args.think_budget if args.think_budget > 0 else None
+        history_ctx = generate_history_summary(
+            model, tokenizer, results.RESULTS_FILE,
+            temperature=0.3,
+            think_budget=min(think_budget, 512) if think_budget else None,
+        )
+        if history_ctx:
+            print(f"\n  --- History summary ---\n{history_ctx[:400]}{'...' if len(history_ctx) > 400 else ''}")
+
         # ── Phase 1: All first attempts ──
         print("\n  --- Phase 1: First attempts ---")
         a1_refs = []  # (ray_ref, index)
-
-        think_budget = args.think_budget if args.think_budget > 0 else None
 
         for g in range(args.batch_size):
             print(f"\n  [Attempt1 {g+1}/{args.batch_size}]")
             rollout, edited_code, proposal = generate_and_apply(
                 model, tokenizer, agent_state, best_code, train_path,
                 temperature=args.temperature, max_new_tokens=args.max_new_tokens,
+                history_context=history_ctx,
                 think_budget=think_budget,
             )
 
@@ -422,6 +434,7 @@ def main():
                 model, tokenizer, agent_state, best_code, train_path,
                 temperature=args.temperature, max_new_tokens=args.max_new_tokens,
                 error_context=reflection_ctx,
+                history_context=history_ctx,
                 think_budget=think_budget,
             )
 

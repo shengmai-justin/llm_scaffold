@@ -25,15 +25,24 @@ def propose_experiment_rl(
     temperature: float = 1.0,
     max_new_tokens: int = 32768,
     error_context: str | None = None,
+    history_context: str | None = None,
     think_budget: int | None = None,
 ) -> tuple[dict, Rollout]:
     """Generate a proposal using the local model. Returns (proposal, rollout).
+
+    history_context is the cross-step dead-end summary (from
+    erl_history.generate_history_summary). error_context is the
+    per-batch reflection (from erl_reflect.build_reflection_context).
+    Both are appended to the user message; history first so it sets
+    strategic constraints before the tactical reflection.
 
     Raises on parse/validation failure (caller handles retry).
     """
     system_msg, user_msg = planner.build_planner_context(
         agent_state["repo_path"], agent_state["best_val_bpb"]
     )
+    if history_context:
+        user_msg += f"\n\n{history_context}"
     if error_context:
         user_msg += f"\n\n{error_context}"
 
