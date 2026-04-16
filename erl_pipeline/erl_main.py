@@ -61,7 +61,8 @@ def generate_and_apply(
             think_budget=think_budget,
         )
     except Exception as e:
-        print(f"  Proposal failed: {e}")
+        # Generation itself failed (CUDA OOM, tokenizer error). No tokens to preserve.
+        print(f"  Proposal failed (generation): {e}")
         rollout = Rollout(
             prompt_text="", proposal_text="", full_ids=torch.tensor([]),
             old_logprobs=torch.tensor([]), prompt_len=0,
@@ -69,6 +70,13 @@ def generate_and_apply(
             reward=compute_reward(None, "edit_failed"),
             description=f"proposal_error: {e}",
         )
+        return rollout, None, None
+
+    if proposal is None:
+        # JSON parse / validation failed, but rollout still has full_ids
+        # so it contributes to GRPO advantage groups (keeps K at batch_size).
+        print(f"  Proposal failed (parse): {rollout.description}")
+        rollout.reward = compute_reward(None, "edit_failed")
         return rollout, None, None
 
     print(f"  >> {proposal['description']}  (risk: {proposal['risk']})")
@@ -411,9 +419,9 @@ def main():
         print(f"  Batch: {len(episodes)} attempts, "
               f"{sum(1 for a in attempt_summaries if a['val_bpb'] is not None and a['val_bpb'] < best_bpb)} improved")
 
-        # Reflection has a much smaller max_new_tokens (1024 default), so cap
+        # Reflection has a smaller max_new_tokens (2048 default), so cap
         # the think portion proportionally — leave at least half for prose.
-        ref_think_budget = min(think_budget, 512) if think_budget else None
+        ref_think_budget = min(think_budget, 1024) if think_budget else None
         ref_text, ref_ids, ref_lp, ref_plen = generate_batch_reflection(
             model, tokenizer,
             batch_feedback=batch_feedback,

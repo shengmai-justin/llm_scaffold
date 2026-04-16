@@ -18,6 +18,54 @@ from rl_model import generate_with_logprobs
 from rl_types import Rollout
 
 
+def _strip_wrappers(text: str) -> str:
+    """Strip <think> blocks and markdown code fences from model output."""
+    clean = text
+    if "</think>" in clean:
+        clean = clean.split("</think>", 1)[1]
+    clean = re.sub(r"<think>.*?</think>", "", clean, flags=re.DOTALL)
+    clean = re.sub(r"^```[a-zA-Z]*\n?", "", clean)
+    clean = re.sub(r"\n?```\s*$", "", clean)
+    return clean.strip()
+
+
+def _extract_json(text: str) -> str:
+    """Best-effort JSON extraction. Tries two stages:
+
+    1. Strip <think>/code fences, return if `json.loads` succeeds.
+    2. Walk the original text backward to find the last balanced
+       top-level {...} block. Salvages `trailing_garbage` failures
+       (model emitted JSON then continued generating prose).
+
+    Returns the best candidate; caller is responsible for json.loads.
+    """
+    cleaned = _strip_wrappers(text)
+    try:
+        json.loads(cleaned)
+        return cleaned
+    except json.JSONDecodeError:
+        pass
+
+    # Walk backward from last '}' to find matching opening brace.
+    end = text.rfind("}")
+    if end == -1:
+        return cleaned
+    depth = 0
+    for i in range(end, -1, -1):
+        if text[i] == "}":
+            depth += 1
+        elif text[i] == "{":
+            depth -= 1
+            if depth == 0:
+                candidate = text[i:end + 1]
+                try:
+                    json.loads(candidate)
+                    return candidate
+                except json.JSONDecodeError:
+                    break
+    return cleaned
+
+
 def propose_experiment_rl(
     model,
     tokenizer,
@@ -27,7 +75,7 @@ def propose_experiment_rl(
     error_context: str | None = None,
     history_context: str | None = None,
     think_budget: int | None = None,
-) -> tuple[dict, Rollout]:
+) -> tuple[dict | None, Rollout]:
     """Generate a proposal using the local model. Returns (proposal, rollout).
 
     history_context is the cross-step dead-end summary (from
@@ -36,7 +84,13 @@ def propose_experiment_rl(
     Both are appended to the user message; history first so it sets
     strategic constraints before the tactical reflection.
 
-    Raises on parse/validation failure (caller handles retry).
+    On parse/validation failure, returns (None, rollout). The rollout
+    retains its generated full_ids and logprobs so it still contributes
+    to GRPO advantage groups — K stays at batch_size, avoiding the TTT
+    beta_max blowup at K=2.
+
+    Still raises if generation itself fails (CUDA OOM, tokenizer error),
+    since in that case there are no tokens to preserve.
     """
     system_msg, user_msg = planner.build_planner_context(
         agent_state["repo_path"], agent_state["best_val_bpb"]
@@ -61,19 +115,7 @@ def propose_experiment_rl(
         think_budget=think_budget,
     )
 
-    # Strip thinking block. The prompt includes <think>, so the response
-    # contains reasoning text then </think> followed by the JSON answer.
-    clean = text
-    if "</think>" in clean:
-        clean = clean.split("</think>", 1)[1]
-    clean = re.sub(r"<think>.*?</think>", "", clean, flags=re.DOTALL)
-    # Strip markdown code fences
-    clean = re.sub(r"^```[a-zA-Z]*\n?", "", clean)
-    clean = re.sub(r"\n?```\s*$", "", clean)
-    clean = clean.strip()
-    proposal = json.loads(clean)
-    planner.validate_planner_output(proposal)
-
+    # Build the rollout BEFORE parsing so full_ids are preserved on failure.
     rollout = Rollout(
         prompt_text=prompt_text,
         proposal_text=text,
@@ -83,6 +125,17 @@ def propose_experiment_rl(
         val_bpb=None,
         status="pending",
         reward=0.0,
-        description=proposal["description"],
+        description="",
     )
+
+    try:
+        candidate = _extract_json(text)
+        proposal = json.loads(candidate)
+        planner.validate_planner_output(proposal)
+    except (json.JSONDecodeError, ValueError, KeyError) as e:
+        rollout.status = "edit_failed"
+        rollout.description = f"json_parse_error: {type(e).__name__}: {e}"
+        return None, rollout
+
+    rollout.description = proposal["description"]
     return proposal, rollout

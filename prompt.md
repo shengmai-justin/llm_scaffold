@@ -8,6 +8,12 @@ Achieve the lowest possible val_bpb. **Much larger improvements are possible bey
 
 - Your response must be valid JSON matching the schema below. No markdown fences, no extra explanation — JSON only.
 
+- **Keep `search` strings minimal.** Use the shortest unique snippet that
+  unambiguously identifies the edit location — typically 1-5 lines, or a
+  single function signature plus the line being replaced. Do NOT quote
+  entire functions, classes, or multi-dozen-line code blocks. Long search
+  strings consume the response budget and cause truncated JSON.
+
 - Do not repeat or recycle ideas/experiments that already failed or were discarded. If you find yourself proposing something similar to a past attempt, STOP and think of a fundamentally different angle.
 
 ## Strategy guidance

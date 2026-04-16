@@ -92,6 +92,8 @@ def generate_with_logprobs(
     prompt: str,
     max_new_tokens: int = 32768,
     temperature: float = 1.0,
+    top_k: int = 20,
+    top_p: float = 0.95,
     think_budget: int | None = None,
 ) -> tuple[str, torch.Tensor, torch.Tensor, int]:
     """Generate a response and collect per-token logprobs.
@@ -101,6 +103,11 @@ def generate_with_logprobs(
     use the same code path as new_logprobs during training, so the importance
     sampling ratio is exactly 1.0 for on-policy updates (no bfloat16
     divergence between autoregressive and parallel forward passes).
+
+    Default sampling params follow the Qwen3.5-9B precise-coding profile
+    (top_k=20, top_p=0.95, presence_penalty=0 — the last is HF default and
+    not set explicitly). Temperature is pass-through so the caller controls
+    exploration vs. focus.
 
     If `think_budget` is set, a BudgetThinkingProcessor is attached to
     force `</think>` once the model has spent that many tokens inside the
@@ -120,6 +127,8 @@ def generate_with_logprobs(
     gen_kwargs = dict(
         max_new_tokens=max_new_tokens,
         temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
         do_sample=True,
         return_dict_in_generate=True,
     )

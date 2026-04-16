@@ -68,10 +68,12 @@ Two supported hardware targets:
 | Learning rate | 4e-5 |
 | KL coefficient | 0.1 |
 | Temperature | 0.7 |
-| Max new tokens | 8192 (small B200) / 32768 (memlimit + TTT + Pro 6000) |
+| Max new tokens | 8192 (small B200) / 16000 (memlimit + TTT + Pro 6000) |
+| Think budget | 6000 (ERL only, forced `</think>` via `BudgetThinkingProcessor`) |
 | Attention | SDPA (all variants) |
 | Eval timeout | 900s per `train.py` run (5-min budget + compile/startup overhead) |
-| Reward | `1/val_bpb` (success) or `0.0` (crash) |
+| Reward | `1/val_bpb` (success) or `0.0` (crash / edit_failed) |
+| History summary | ERL only: 1 LLM call/step summarizes `results.tsv` dead ends + worked directions into proposal prompts |
 | ERL attempt advantages | `--adv-type grpo` (default) or `--adv-type ttt` (entropic LOO) |
 | B200 modules | gcc/14.2.0, cuda/12.8.1, conda |
 | Pro 6000 env setup | uv venv + pinned pip install (no modules) |
@@ -119,7 +121,8 @@ ERL variants shard the model across 2 GPUs (via `--model-gpus "0,1"` + HuggingFa
 | Workers/GPU | 2 | 2 |
 | GPU mem limit | 88000 MB per worker | 88000 MB per worker |
 | Batch size | 8 | 4 |
-| Max new tokens | 8192 | 32768 |
+| Max new tokens | 8192 | 16000 |
+| Think budget | — | 6000 |
 | Steps | 100 | 100 |
 | Time limit | 12 hours | 12 hours |
 | Submit | `sbatch rl_pipeline/run_rl_4gpu_memlimit.sh` | `sbatch erl_pipeline/run_erl_4gpu_memlimit.sh` |
@@ -135,7 +138,8 @@ Same layout as `run_erl_4gpu_memlimit.sh` but passes `--adv-type ttt` to swap at
 | Eval GPUs | 2,3 |
 | Workers/GPU | 2 |
 | Batch size | 4 |
-| Max new tokens | 32768 |
+| Max new tokens | 16000 |
+| Think budget | 6000 |
 | Adv type | `ttt` |
 | Working repo | `autoresearch_erl_ttt/` (isolated from GRPO `autoresearch_erl/`) |
 | Worker dirs | `autoresearch_erl_ttt_worker_*/` |
@@ -146,26 +150,27 @@ TTT and GRPO runs can coexist on the same filesystem without interfering — eac
 
 ### Pro 6000 Blackwell
 
-Frozen pipeline takes 2 GPUs (SGLang + main.py). ERL runs on the remaining 6, auto-detected. The model is sharded across 3 GPUs (96 GB each is tight for 9B training on long sequences), eval runs on the other 3.
+Frozen pipeline takes 2 GPUs (SGLang + main.py). ERL runs on 8 auto-detected GPUs. The model is sharded across 4 GPUs (9B + LoRA at ~9 GB each, leaves headroom for training activations), eval runs on the other 4 with one worker per GPU.
 
 | | Frozen | ERL |
 |---|---|---|
 | Script | `run_pro6000.sh` | `erl_pipeline/run_erl_pro6000.sh` |
-| SBATCH GPUs | 2 | 6 |
-| Model GPUs | 0 (SGLang, auto-picked) | 0,1,2 sharded (auto-picked, least-used 3) |
-| Experiment / eval GPUs | 1 (main.py, auto-picked) | 3,4,5 (auto-picked, next 3) |
+| SBATCH GPUs | 2 | 8 |
+| Model GPUs | 0 (SGLang, auto-picked) | 0,1,2,3 sharded (auto-picked, least-used 4) |
+| Experiment / eval GPUs | 1 (main.py, auto-picked) | 4,5,6,7 (auto-picked, next 4) |
 | Workers/GPU | — | 1 |
 | GPU mem limit | none (single SGLang + single main.py) | none (96 GB per worker is plenty) |
-| Batch size | — | 3 (matches 3 eval workers, 1 wave per phase) |
-| Max new tokens | — | 32768 |
-| Steps | unlimited | 50 |
+| Batch size | — | 4 (matches 4 eval workers, 1 wave per phase) |
+| Max new tokens | — | 16000 |
+| Think budget | — | 6000 |
+| Steps | unlimited | 100 |
 | Env setup | uv venv + pinned pip install, no modules | same |
 | Attention backend | SGLang `--attention-backend triton` | SDPA (`--attn-impl sdpa`) |
 | train.py variant | `train_sdpa.py` auto-installed into source | same |
-| Time limit | 12 hours | 12 hours |
+| Time limit | 12 hours | n/a (non-SLURM, runs until complete) |
 | Submit | `bash run_pro6000.sh` | `bash erl_pipeline/run_erl_pro6000.sh` |
 
-**GPU auto-detection:** Both scripts pick the N least-used GPUs via `nvidia-smi --query-gpu=memory.used`. The frozen pipeline picks 2, ERL picks 6 (first 3 for model, next 3 for eval). If the frozen pipeline is running, ERL automatically avoids its GPUs. Since this cluster has no SLURM, `#SBATCH` directives are inert comments and scripts are launched directly with `bash`.
+**GPU auto-detection:** Both scripts pick the N least-used GPUs via `nvidia-smi --query-gpu=memory.used`. The frozen pipeline picks 2, ERL picks 8 (first 4 for model, next 4 for eval). On an 8-GPU box run one or the other, not both simultaneously. Since this cluster has no SLURM, `#SBATCH` directives are inert comments and scripts are launched directly with `bash` (typically via `nohup ... &` for persistence across SSH disconnects).
 
 ### Memory-limited test (3 GPUs, quick validation)
 
@@ -284,7 +289,7 @@ sbatch erl_pipeline/hold_gpus.sh
 # Frozen (2 GPUs, auto-picked)
 bash run_pro6000.sh
 
-# ERL (6 GPUs, auto-picked — 3 model / 3 eval)
+# ERL (8 GPUs, auto-picked — 4 model / 4 eval)
 bash erl_pipeline/run_erl_pro6000.sh
 
 # ── Ops ─────────────────────────────────────────────────────
@@ -296,9 +301,10 @@ tail -f rl_pipeline/rl_log/run.log
 tail -f erl_pipeline/erl_log/run.log
 
 # Clean up worker repos
-bash rl_pipeline/clean.sh        # RL pipeline
-bash erl_pipeline/clean.sh       # ERL GRPO
-bash erl_pipeline/clean_ttt.sh   # ERL TTT (separate script)
+bash rl_pipeline/clean.sh            # RL pipeline
+bash erl_pipeline/clean.sh           # ERL GRPO (B200 paths)
+bash erl_pipeline/clean_ttt.sh       # ERL TTT (B200 paths)
+bash erl_pipeline/clean_pro6000.sh   # ERL Pro 6000 (itml-1 paths + /tmp/raye_$USER)
 
 # Restart on an existing SLURM allocation (SSH directly to node first)
 bash erl_pipeline/restart_grpo.sh

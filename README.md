@@ -107,12 +107,12 @@ The script handles everything on first run:
 - Clones `autoresearch/` if missing and copies `train_sdpa.py` → `autoresearch/train.py`
 - Picks the 2 least-used GPUs, launches SGLang on one and `main.py` on the other
 
-**Run the ERL pipeline too** (optional, uses the remaining 6 GPUs — 3 for model sharding, 3 for eval):
+**Run the ERL pipeline too** (optional, uses 8 GPUs — 4 for model sharding, 4 for eval):
 ```bash
 bash erl_pipeline/run_erl_pro6000.sh
 ```
 
-Both scripts auto-pick their GPUs via `nvidia-smi --query-gpu=memory.used`, so the ERL script avoids whichever 2 the frozen pipeline grabbed.
+Both scripts auto-pick their GPUs via `nvidia-smi --query-gpu=memory.used` (frozen 2 + ERL 8). On an 8-GPU box either run the frozen pipeline OR the ERL pipeline, not both simultaneously.
 
 `train_sdpa.py` at the scaffold root is auto-copied over `autoresearch/train.py` on every Pro 6000 run, so source stays in sync. No `flash-attn-4` used at runtime — the `--attention-backend triton` flag keeps SGLang off the FA4 codepath entirely, and `train_sdpa.py` uses PyTorch SDPA with an explicit causal + left-only sliding window mask.
 
@@ -213,12 +213,12 @@ Only experiments that actually run training count toward `experiment_count`. Fai
 | SGLang KV cache (`--mem-fraction-static 0.5`, ~48 GB total for SGLang) | ~30 GB |
 | Available for training on the other GPU | ~96 GB |
 
-For ERL on 6× Pro 6000 (2 GPUs reserved for the frozen pipeline): model
-sharded across 3 GPUs via HuggingFace `device_map="auto"` (~12 GB each
-for the 9B base + LoRA), one eval worker per remaining GPU on the other
-3 (~5–10 GB each). No memlimit needed because each worker owns its GPU.
-Training peak per model GPU is significantly reduced by sharding — the
-full 9B forward+backward activations split across the 3 model GPUs
+For ERL on 8× Pro 6000 (standalone run, not alongside frozen pipeline):
+model sharded across 4 GPUs via HuggingFace `device_map="auto"` (~9 GB
+each for the 9B base + LoRA), one eval worker per remaining GPU on the
+other 4 (~5–10 GB each). No memlimit needed because each worker owns its
+GPU. Training peak per model GPU is significantly reduced by sharding —
+the full 9B forward+backward activations split across the 4 model GPUs
 instead of stacking on one.
 
 ## Configuration

@@ -60,13 +60,18 @@ def generate_and_apply(
             max_new_tokens=max_new_tokens,
         )
     except Exception as e:
-        print(f"  Proposal failed: {e}")
+        print(f"  Proposal failed (generation): {e}")
         rollout = Rollout(
             prompt_text="", proposal_text="", full_ids=torch.tensor([]),
             old_logprobs=torch.tensor([]), prompt_len=0,
             val_bpb=None, status="edit_failed", reward=-1.0,
             description=f"proposal_error: {e}",
         )
+        return rollout, None, None
+
+    if proposal is None:
+        print(f"  Proposal failed (parse): {rollout.description}")
+        rollout.reward = compute_reward(None, "edit_failed")
         return rollout, None, None
 
     print(f"  >> {proposal['description']}  (risk: {proposal['risk']})")
@@ -85,10 +90,13 @@ def generate_and_apply(
                 max_new_tokens=max_new_tokens,
                 error_context=error_msg,
             )
-            proposal = proposal2
-            rollout = rollout2
-            print(f"  >> {proposal['description']}  (risk: {proposal['risk']})")
-            missing = planner.validate_edit_targets(train_path, proposal["edits"])
+            if proposal2 is not None:
+                proposal = proposal2
+                rollout = rollout2
+                print(f"  >> {proposal['description']}  (risk: {proposal['risk']})")
+                missing = planner.validate_edit_targets(train_path, proposal["edits"])
+            else:
+                missing = ["retry parse failed"]
         except Exception:
             missing = ["retry failed"]
 
@@ -172,13 +180,18 @@ def run_single_rollout(
             max_new_tokens=max_new_tokens,
         )
     except Exception as e:
-        print(f"  Proposal failed: {e}")
+        print(f"  Proposal failed (generation): {e}")
         rollout = Rollout(
             prompt_text="", proposal_text="", full_ids=torch.tensor([]),
             old_logprobs=torch.tensor([]), prompt_len=0,
             val_bpb=None, status="edit_failed", reward=-1.0,
             description=f"proposal_error: {e}",
         )
+        return rollout, None
+
+    if proposal is None:
+        print(f"  Proposal failed (parse): {rollout.description}")
+        rollout.reward = compute_reward(None, "edit_failed")
         return rollout, None
 
     print(f"  >> {proposal['description']}  (risk: {proposal['risk']})")
@@ -197,10 +210,13 @@ def run_single_rollout(
                 max_new_tokens=max_new_tokens,
                 error_context=error_msg,
             )
-            proposal = proposal2
-            rollout = rollout2
-            print(f"  >> {proposal['description']}  (risk: {proposal['risk']})")
-            missing = planner.validate_edit_targets(train_path, proposal["edits"])
+            if proposal2 is not None:
+                proposal = proposal2
+                rollout = rollout2
+                print(f"  >> {proposal['description']}  (risk: {proposal['risk']})")
+                missing = planner.validate_edit_targets(train_path, proposal["edits"])
+            else:
+                missing = ["retry parse failed"]
         except Exception:
             missing = ["retry failed"]
 
