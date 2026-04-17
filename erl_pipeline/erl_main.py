@@ -308,7 +308,7 @@ def main():
         lora_path = os.path.join(args.log_dir, f"lora_step_{args.resume_step:06d}")
         if os.path.exists(lora_path):
             from peft import PeftModel
-            model = PeftModel.from_pretrained(model.base_model.model, lora_path)
+            model = PeftModel.from_pretrained(model.base_model.model, lora_path, is_trainable=True)
             optimizer = torch.optim.AdamW(
                 [p for p in model.parameters() if p.requires_grad],
                 lr=args.lr, betas=(0.9, 0.95), eps=1e-8,
