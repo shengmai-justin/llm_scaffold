@@ -4,7 +4,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=100gb
-#SBATCH --time=12:00:00
+#SBATCH --time=04:00:00
 #SBATCH --partition=hpg-b200
 #SBATCH --gpus=4
 
@@ -85,5 +85,4 @@ python erl_main.py \
     --adv-type ttt \
     --log-dir ./erl_log_ttt
 
-echo "Python exited at $(date). Allocation held — rerun or scancel to release."
-sleep infinity
+echo "Python exited at $(date)."
