@@ -160,6 +160,7 @@ python erl_main.py \
     --max-new-tokens 16000 \
     --think-budget 6000 \
     --attn-impl sdpa \
-    --log-dir ./erl_log_pro6000
+    --log-dir ./erl_log_pro6000 \
+    --resume-step 16
 
 echo "Finished. $(date)"

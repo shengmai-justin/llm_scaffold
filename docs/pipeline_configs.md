@@ -68,8 +68,9 @@ Two supported hardware targets:
 | Learning rate | 4e-5 |
 | KL coefficient | 0.1 |
 | Temperature | 0.7 |
-| Max new tokens | 8192 (small B200) / 16000 (memlimit + TTT + Pro 6000) |
-| Think budget | 6000 (ERL only, forced `</think>` via `BudgetThinkingProcessor`) |
+| Top-k / top-p | 20 / 0.95 (Qwen3.5-9B precise-coding profile, `rl_model.py` defaults, 2026-04-16) |
+| Max new tokens | 8192 (small B200) / 16000 (memlimit + TTT + Pro 6000); reflection 2048 |
+| Think budget | Proposals 6000, reflection 1024 (ERL only, forced `</think>` + `<think>`-re-open block via `BudgetThinkingProcessor`) |
 | Attention | SDPA (all variants) |
 | Eval timeout | 900s per `train.py` run (5-min budget + compile/startup overhead) |
 | Reward | `1/val_bpb` (success) or `0.0` (crash / edit_failed) |

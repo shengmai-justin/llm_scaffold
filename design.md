@@ -315,17 +315,19 @@ Single in-process model for both generation and training. LoRA weights are alway
 | Function | Description |
 |---|---|
 | `load_model(model_dir, device, lora_rank, lora_alpha, lora_path, attn_impl)` | Load base model + LoRA adapter. Returns `(model, tokenizer)` |
-| `generate_with_logprobs(model, tokenizer, prompt, max_new_tokens, temperature)` | Generate response, then recompute logprobs via `compute_response_logprobs` (same KV-cache split path as training) to avoid bfloat16 ratio divergence. Returns `(text, full_ids, logprobs, prompt_len)` |
+| `generate_with_logprobs(model, tokenizer, prompt, max_new_tokens, temperature, top_k=20, top_p=0.95, think_budget)` | Generate response, then recompute logprobs via `compute_response_logprobs` (same KV-cache split path as training) to avoid bfloat16 ratio divergence. Sampling defaults follow Qwen3.5-9B precise-coding profile (top_k=20, top_p=0.95; presence_penalty=0 via HF default). If `think_budget` is set, attaches `BudgetThinkingProcessor` (forces `</think>` at budget, blocks re-opening after close). Returns `(text, full_ids, logprobs, prompt_len)` |
 | `compute_response_logprobs(model, full_ids, prompt_len, temperature)` | Forward pass with grad for response tokens (KV-cache split: prompt no-grad, response with-grad) |
 | `compute_base_logprobs(model, full_ids, prompt_len, temperature)` | Forward pass with LoRA adapters disabled to get base model logprobs |
 
 #### `rl_planner.py` — Local Generation Wrapper
 
-Wraps `planner.py` for RL mode: uses `generate_with_logprobs` instead of the OpenAI API, strips `<think>...</think>` tags from Qwen3.5 responses.
+Wraps `planner.py` for RL mode: uses `generate_with_logprobs` instead of the OpenAI API, strips `<think>...</think>` tags from Qwen3.5 responses, and brace-matches the last `{...}` block as a fallback when the primary strip path fails.
 
 | Function | Description |
 |---|---|
-| `propose_experiment_rl(model, tokenizer, agent_state, temperature, max_new_tokens, error_context)` | Generate a proposal locally, return `(proposal, rollout)`. Raises on parse failure. |
+| `_strip_wrappers(text)` | Strip think tags and markdown code fences. First-stage JSON cleanup. |
+| `_extract_json(text)` | Two-stage JSON extraction: (1) strip wrappers and try `json.loads`; (2) walk text backward to find the last balanced `{...}` block and try parsing that. Salvages trailing-garbage and prose-prefix failures. |
+| `propose_experiment_rl(model, tokenizer, agent_state, temperature, max_new_tokens, error_context, history_context, think_budget)` | Generate a proposal locally. Returns `(proposal, rollout)` on success, or `(None, rollout_with_full_ids)` on parse/validation failure. The rollout retains its `full_ids` and `old_logprobs` so it still contributes to GRPO advantage groups (K stays at `batch_size`, avoiding the TTT `beta_max` corner case at K=2). Only raises on true generation failures (CUDA OOM, tokenizer error) where no tokens exist to preserve. |
 
 #### `rl_trainer.py` — RL Training
 
@@ -375,22 +377,26 @@ PUCTSampler methods:
 ### Rollout Flow
 
 ```
-1. Parse failure (no </think>, bad JSON, exhausted max_new_tokens)
-   → full_ids empty → RETRY (no training signal)
+1. Parse failure (bad JSON, exhausted max_new_tokens inside <think>)
+   → full_ids preserved, status="edit_failed", reward=0.0
+   → STILL counts as valid rollout in GRPO advantage group (2026-04-16)
+   → K stays at batch_size, TTT beta_max at K=2 avoided
 
-2. Proposal parses but edits fail (search string not found)
-   → full_ids has data, status="edit_failed", reward=-1.0
+2. Proposal parses but edits fail (search string not found / no diff)
+   → full_ids has data, status="edit_failed", reward=0.0
    → counts as valid rollout (useful RL signal, not retried)
 
 3. Edits apply but train.py crashes/times out
-   → status="crash", reward=-1.0
+   → status="crash", reward=0.0
 
 4. Edits apply and train.py succeeds
-   → status="keep", reward=-val_bpb
-   → child State added to PUCT tree
+   → status="keep", reward=1/val_bpb (TTT-Discover pattern)
+   → child State added to PUCT tree (RL pipeline)
 
 5. train.py always resets to parent code after every rollout
 ```
+
+Per the 2026-04-15 reward-consistency fix, all failure modes (JSON parse, search-string miss, crash) use `compute_reward(None, "edit_failed") = 0.0` — no hardcoded `-1.0` anywhere. The 2026-04-16 parse-preservation fix ensures even path (1) keeps its `full_ids` so the rollout stays in the group.
 
 ### Known Issues (Fixed)
 
