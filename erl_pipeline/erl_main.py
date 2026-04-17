@@ -309,6 +309,7 @@ def main():
         if os.path.exists(lora_path):
             from peft import PeftModel
             model = PeftModel.from_pretrained(model.base_model.model, lora_path, is_trainable=True)
+            model.input_device = next(model.parameters()).device
             optimizer = torch.optim.AdamW(
                 [p for p in model.parameters() if p.requires_grad],
                 lr=args.lr, betas=(0.9, 0.95), eps=1e-8,
@@ -339,7 +340,8 @@ def main():
     rollout_log_path = os.path.join(args.log_dir, "rollouts.jsonl")
 
     # ── Main loop ──
-    for step in range(args.num_steps):
+    start_step = args.resume_step + 1 if args.resume_step is not None else 0
+    for step in range(start_step, args.num_steps):
         step_start = time.time()
         print(f"\n{'='*60}")
         print(f"ERL Step {step}/{args.num_steps} | Best: {best_bpb:.6f}")
