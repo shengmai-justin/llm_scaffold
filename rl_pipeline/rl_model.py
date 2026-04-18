@@ -40,9 +40,7 @@ def load_model(
         tokenizer.pad_token = tokenizer.eos_token
 
     if model_gpus and len(model_gpus) > 1:
-        total_gib = torch.cuda.get_device_properties(model_gpus[0]).total_memory / (1024**3)
-        budget = f"{int(total_gib * 0.75)}GiB"
-        max_memory = {g: budget for g in model_gpus}
+        max_memory = {g: "170GiB" for g in model_gpus}
         model = AutoModelForCausalLM.from_pretrained(
             model_dir,
             dtype=torch.bfloat16,
