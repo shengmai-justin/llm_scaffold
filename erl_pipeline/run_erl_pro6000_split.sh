@@ -64,11 +64,17 @@ if [ ! -d "$VENV_DIR" ]; then
 fi
 source "$VENV_DIR/bin/activate"
 
+# ── Clone the ERL working repo if missing (erl_main also does this, but
+#    we need the dir to exist before the .venv symlink step below).
+if [ ! -d "$ERL_REPO" ]; then
+    echo "Cloning $SOURCE_REPO -> $ERL_REPO"
+    cp -r "$SOURCE_REPO" "$ERL_REPO"
+fi
+
 # ── Ensure the ERL repo's .venv points at our activated env ──
 # uv run resolves ./.venv in the cwd, ignoring VIRTUAL_ENV. Without this
 # symlink, `uv run train.py` inside autoresearch_erl_split/ auto-creates
 # a broken local .venv and the baseline fails with "no Python executable".
-mkdir -p "$ERL_REPO"
 if [ -e "$ERL_REPO/.venv" ] && [ ! -L "$ERL_REPO/.venv" ]; then
     rm -rf "$ERL_REPO/.venv"
 fi
