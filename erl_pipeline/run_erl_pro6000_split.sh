@@ -64,6 +64,16 @@ if [ ! -d "$VENV_DIR" ]; then
 fi
 source "$VENV_DIR/bin/activate"
 
+# ── Ensure the ERL repo's .venv points at our activated env ──
+# uv run resolves ./.venv in the cwd, ignoring VIRTUAL_ENV. Without this
+# symlink, `uv run train.py` inside autoresearch_erl_split/ auto-creates
+# a broken local .venv and the baseline fails with "no Python executable".
+mkdir -p "$ERL_REPO"
+if [ -e "$ERL_REPO/.venv" ] && [ ! -L "$ERL_REPO/.venv" ]; then
+    rm -rf "$ERL_REPO/.venv"
+fi
+ln -sfn "$VENV_DIR" "$ERL_REPO/.venv"
+
 # ── Install pinned dependencies (Pro 6000 stack) ─────────────
 echo "Installing/updating Python dependencies..."
 uv pip install --quiet \
