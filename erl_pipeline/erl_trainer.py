@@ -69,12 +69,28 @@ def erl_train_step(
     max_grad_norm: float = 1.0,
     dr_grpo: bool = False,
     adv_type: str = "grpo",
+    loss_agg_mode: str = "seq-sum-token-mean",
+    clip_ratio_high: float | None = None,
 ) -> dict:
     """One ERL training step with four signals.
 
     Attempt advantages are computed internally via `adv_type`:
     "grpo" (default) or "ttt" (entropic LOO).  Reflection and
     distillation signals are unchanged.
+
+    `loss_agg_mode` selects how per-token policy-loss values are combined:
+      - "seq-sum-token-mean" (default): each rollout's token-mean loss is
+        summed across rollouts (gradient-accumulation via separate backward
+        calls).  Matches prior behavior.
+      - "seq-mean-token-mean": DeepSeek-original GRPO — each rollout
+        token-meaned, then averaged across rollouts (divide by K).
+      - "seq-mean-token-sum": ERL paper default — tokens summed within a
+        rollout, then averaged across rollouts.
+      - "seq-mean-token-sum-norm": Dr. GRPO — token-sum within rollout,
+        normalized by K * max_len (length-bias corrected).
+
+    `clip_ratio_high`, if set, enables PPO-style upper-bound asymmetric
+    clipping on the importance ratio (DAPO).  Default disabled.
     """
     optimizer.zero_grad()
     total_grpo_loss = 0.0
@@ -93,7 +109,11 @@ def erl_train_step(
         for rollout, adv in zip(a1_rollouts, a1_advs):
             if abs(adv.item()) < 1e-8:
                 continue
-            m = _grpo_loss(model, rollout, adv.item(), kl_coef, temperature, all_ratios, all_kls)
+            m = _grpo_loss(model, rollout, adv.item(), kl_coef, temperature,
+                           all_ratios, all_kls,
+                           group_size=len(a1_rollouts),
+                           loss_agg_mode=loss_agg_mode,
+                           clip_ratio_high=clip_ratio_high)
             total_grpo_loss += m["loss"] * m["tokens"]
             num_grpo_tokens += m["tokens"]
 
@@ -108,6 +128,9 @@ def erl_train_step(
                 model, reflection.full_ids, reflection.old_logprobs,
                 reflection.prompt_len, ref_adv, kl_coef, temperature,
                 all_ratios, all_kls,
+                group_size=1,
+                loss_agg_mode=loss_agg_mode,
+                clip_ratio_high=clip_ratio_high,
             )
             total_reflect_loss += m["loss"] * m["tokens"]
             num_reflect_tokens += m["tokens"]
@@ -119,7 +142,11 @@ def erl_train_step(
         for rollout, adv in zip(a2_rollouts, a2_advs):
             if abs(adv.item()) < 1e-8:
                 continue
-            m = _grpo_loss(model, rollout, adv.item(), kl_coef, temperature, all_ratios, all_kls)
+            m = _grpo_loss(model, rollout, adv.item(), kl_coef, temperature,
+                           all_ratios, all_kls,
+                           group_size=len(a2_rollouts),
+                           loss_agg_mode=loss_agg_mode,
+                           clip_ratio_high=clip_ratio_high)
             total_grpo_loss += m["loss"] * m["tokens"]
             num_grpo_tokens += m["tokens"]
 
@@ -159,12 +186,18 @@ def _grpo_loss(
     model, rollout: Rollout, advantage: float,
     kl_coef: float, temperature: float,
     all_ratios: list, all_kls: list,
+    group_size: int = 1,
+    loss_agg_mode: str = "seq-sum-token-mean",
+    clip_ratio_high: float | None = None,
 ) -> dict:
     """GRPO policy gradient loss for one rollout. Calls backward."""
     return _grpo_loss_from_tensors(
         model, rollout.full_ids, rollout.old_logprobs,
         rollout.prompt_len, advantage, kl_coef, temperature,
         all_ratios, all_kls,
+        group_size=group_size,
+        loss_agg_mode=loss_agg_mode,
+        clip_ratio_high=clip_ratio_high,
     )
 
 
@@ -173,6 +206,9 @@ def _grpo_loss_from_tensors(
     prompt_len: int, advantage: float,
     kl_coef: float, temperature: float,
     all_ratios: list, all_kls: list,
+    group_size: int = 1,
+    loss_agg_mode: str = "seq-sum-token-mean",
+    clip_ratio_high: float | None = None,
 ) -> dict:
     """GRPO loss from raw tensors (used for both rollouts and reflection)."""
     old_lp = old_logprobs.to(model.input_device)
@@ -194,7 +230,31 @@ def _grpo_loss_from_tensors(
         all_kls.append(kl_per_token.mean().item())
         shaped_adv = shaped_adv - kl_coef * kl_per_token
 
-    loss = -(ratio * shaped_adv).mean()
+    if clip_ratio_high is not None:
+        # PPO-style asymmetric clip: pessimistic min(r*A, clip(r, 1-eps, 1+eps_high)*A).
+        # Use symmetric lower bound (1 - clip_ratio_high) unless we add a separate low knob.
+        ratio_clipped = torch.clamp(ratio, 1.0 - clip_ratio_high, 1.0 + clip_ratio_high)
+        obj_unclipped = ratio * shaped_adv
+        obj_clipped = ratio_clipped * shaped_adv
+        per_token = -torch.min(obj_unclipped, obj_clipped)
+    else:
+        per_token = -(ratio * shaped_adv)
+
+    if loss_agg_mode == "seq-sum-token-mean":
+        loss = per_token.mean()
+    elif loss_agg_mode == "seq-mean-token-mean":
+        loss = per_token.mean() / group_size
+    elif loss_agg_mode == "seq-mean-token-sum":
+        loss = per_token.sum() / group_size
+    elif loss_agg_mode == "seq-mean-token-sum-norm":
+        # Dr. GRPO: divide by fixed constant (max_len proxy = response length).
+        # Using the current rollout's token count as the proxy constant is a
+        # reasonable per-rollout approximation; a true fixed max_len would
+        # require threading the global max through the call chain.
+        loss = per_token.sum() / (group_size * max(len(new_lp), 1))
+    else:
+        raise ValueError(f"Unknown loss_agg_mode: {loss_agg_mode}")
+
     loss.backward()
     return {"loss": loss.item(), "tokens": len(new_lp)}
 

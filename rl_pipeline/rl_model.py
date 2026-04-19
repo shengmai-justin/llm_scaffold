@@ -23,12 +23,19 @@ def load_model(
     lora_alpha: int = 64,
     lora_path: str | None = None,
     attn_impl: str = "sdpa",
+    use_ddp: bool = False,
+    local_rank: int = 0,
 ) -> tuple:
     """Load base model + LoRA adapter. Returns (model, tokenizer).
 
-    If model_gpus is given (e.g. [0, 1]), the model is sharded across
-    those GPUs via device_map="auto" + max_memory.  Otherwise falls back
-    to the single-device path using `device`.
+    Three loading modes:
+      - `use_ddp=True`: each rank loads a full replica on `cuda:{local_rank}`
+        and wraps with DistributedDataParallel. For multi-GPU training where
+        the model fits on a single GPU (the standard case for Qwen3.5-9B).
+      - `model_gpus=[0,1,...]`: shard the model across those GPUs via HF
+        `device_map="auto"` + `max_memory`. Intended for inference / when
+        the model does not fit on one GPU. NOT recommended for training.
+      - else: single-device load on `device`.
 
     If lora_path is given, loads an existing adapter from disk.
     Otherwise creates a fresh LoRA adapter.
@@ -39,7 +46,14 @@ def load_model(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    if model_gpus and len(model_gpus) > 1:
+    if use_ddp:
+        ddp_device = torch.device(f"cuda:{local_rank}")
+        model = AutoModelForCausalLM.from_pretrained(
+            model_dir,
+            dtype=torch.bfloat16,
+            attn_implementation=attn_impl,
+        ).to(ddp_device)
+    elif model_gpus and len(model_gpus) > 1:
         max_memory = {g: "170GiB" for g in model_gpus}
         model = AutoModelForCausalLM.from_pretrained(
             model_dir,
@@ -71,14 +85,39 @@ def load_model(
         )
         model = get_peft_model(model, lora_config)
 
-    model.gradient_checkpointing_enable()
+    # Non-reentrant checkpointing plays better with DDP / FSDP and uses
+    # slightly less memory. Harmless for the non-DDP paths.
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     model.print_trainable_parameters()
 
     # Store the input device for callers that need to place tensors.
     # With device_map across multiple GPUs, model.device may not exist.
     model.input_device = next(model.parameters()).device
 
+    if use_ddp:
+        # Wrap AFTER LoRA so DDP sees the PEFT-adapted parameter set.
+        # find_unused_parameters=True: distill/reflection paths don't
+        # always activate every LoRA param in a given step.
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[local_rank], find_unused_parameters=True,
+        )
+        # Preserve input_device on the DDP wrapper for call-sites that
+        # access it directly (they use model.input_device without unwrapping).
+        model.input_device = ddp_device
+
     return model, tokenizer
+
+
+def underlying(model):
+    """Return the unwrapped model (strips DDP if present).
+
+    Use at call-sites that need `.generate()`, `.save_pretrained()`, or
+    LoRA-specific methods (`.disable_adapter()`, etc.) which live on the
+    PeftModel beneath any DDP wrapper.
+    """
+    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+        return model.module
+    return model
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +178,7 @@ def generate_with_logprobs(
             BudgetThinkingProcessor(tokenizer, prompt_len, think_budget),
         ])
 
-    outputs = model.generate(**inputs, **gen_kwargs)
+    outputs = underlying(model).generate(**inputs, **gen_kwargs)
 
     full_ids = outputs.sequences[0].cpu()  # [prompt_len + new_tokens]
     del outputs
@@ -222,10 +261,11 @@ def compute_base_logprobs(
 
     Same KV-cache split as compute_response_logprobs but fully no_grad.
     """
-    model.disable_adapter_layers()
+    peft_model = underlying(model)
+    peft_model.disable_adapter_layers()
     try:
         input_ids = full_ids.unsqueeze(0).to(model.input_device)
         past_kv, last_logit = _prompt_forward(model, input_ids, prompt_len)
         return _response_logprobs(model, input_ids, prompt_len, past_kv, last_logit, temperature)
     finally:
-        model.enable_adapter_layers()
+        peft_model.enable_adapter_layers()

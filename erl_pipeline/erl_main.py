@@ -25,8 +25,8 @@ import torch
 import planner
 import results
 import state as state_mod
-from rl_model import load_model
-from rl_planner import propose_experiment_rl
+from rl_model import load_model, underlying
+from rl_planner import propose_experiment_rl, propose_experiment_split
 from rl_trainer import compute_reward
 from rl_types import Rollout
 
@@ -46,13 +46,14 @@ TRAIN_TIMEOUT = 900
 def generate_and_apply(
     model, tokenizer, agent_state, parent_code, train_path,
     temperature, max_new_tokens, error_context=None, history_context=None,
-    think_budget=None,
+    think_budget=None, split_pipeline=False,
 ):
     """Generate proposal, apply edits. Returns (rollout, edited_code, proposal)."""
     state_mod.write_file(train_path, parent_code)
 
+    propose_fn = propose_experiment_split if split_pipeline else propose_experiment_rl
     try:
-        proposal, rollout = propose_experiment_rl(
+        proposal, rollout = propose_fn(
             model, tokenizer, agent_state,
             temperature=temperature,
             max_new_tokens=max_new_tokens,
@@ -232,6 +233,19 @@ def main():
     parser.add_argument("--dr-grpo", action="store_true", help="Use Dr. GRPO (mean-only, no std normalization)")
     parser.add_argument("--adv-type", choices=["grpo", "ttt"], default="grpo",
                         help="Attempt-rollout advantage: 'grpo' (default) or 'ttt' (TTT-Discover entropic LOO)")
+    parser.add_argument("--loss-agg-mode",
+                        choices=["seq-sum-token-mean", "seq-mean-token-mean",
+                                 "seq-mean-token-sum", "seq-mean-token-sum-norm"],
+                        default="seq-sum-token-mean",
+                        help="Policy-loss aggregation. Default matches prior behavior "
+                             "(sum across rollouts, mean within). 'seq-mean-token-sum' "
+                             "matches ERL paper / verl default.")
+    parser.add_argument("--clip-ratio-high", type=float, default=None,
+                        help="Enable PPO-style asymmetric ratio clipping at 1+eps (e.g. 0.28 for DAPO). "
+                             "None = disabled (current behavior).")
+    parser.add_argument("--split-pipeline", action="store_true",
+                        help="Decompose proposal into Ideator (RL-trained) + Implementer "
+                             "(frozen, no grad). See docs/SPLIT_PIPELINE.md.")
     parser.add_argument("--attn-impl", default="sdpa")
     parser.add_argument("--log-dir", default=os.path.join(PIPELINE_DIR, "erl_log"))
     parser.add_argument("--resume-step", type=int, default=None)
@@ -243,13 +257,33 @@ def main():
     train_path = os.path.join(repo_path, "train.py")
     os.makedirs(args.log_dir, exist_ok=True)
 
+    # ── DDP init (activates when launched via torchrun) ────────
+    is_distributed = "LOCAL_RANK" in os.environ
+    if is_distributed:
+        torch.distributed.init_process_group("nccl")
+        local_rank = int(os.environ["LOCAL_RANK"])
+        world_size = torch.distributed.get_world_size()
+        torch.cuda.set_device(local_rank)
+    else:
+        local_rank = 0
+        world_size = 1
+    is_rank0 = (local_rank == 0)
+
     # Parse model GPUs: --model-gpus "0,1" takes priority over --model-gpu 0
-    if args.model_gpus:
+    # In DDP mode, LOCAL_RANK picks the GPU; --model-gpus is ignored.
+    if is_distributed:
+        model_gpu_ids = [local_rank]
+    elif args.model_gpus:
         model_gpu_ids = [int(g) for g in args.model_gpus.split(",")]
     else:
         model_gpu_ids = [args.model_gpu]
 
     parallel_mode = bool(args.eval_gpus)
+    # DDP v1 constraint: batch_size must equal world_size (1 rollout per rank).
+    if is_distributed and args.batch_size != world_size:
+        raise ValueError(
+            f"DDP v1 requires batch_size ({args.batch_size}) == world_size ({world_size})"
+        )
 
     # Clone repo if needed
     if not os.path.exists(repo_path):
@@ -264,9 +298,9 @@ def main():
         print(f"ERROR: train.py not found at {train_path}")
         sys.exit(1)
 
-    # Init Ray workers
+    # Init Ray workers (rank 0 only in DDP — workers are a shared pool)
     workers = None
-    if parallel_mode:
+    if parallel_mode and is_rank0:
         import ray
         runtime_env = {"env_vars": {"PYTHONPATH": RL_PIPELINE_DIR}}
         ray.init(ignore_reinit_error=True, runtime_env=runtime_env)
@@ -278,7 +312,16 @@ def main():
         print(f"Parallel mode: model GPUs {model_gpu_ids}, eval GPUs {eval_gpu_ids}")
 
     # Load model
-    if len(model_gpu_ids) > 1:
+    if is_distributed:
+        if is_rank0:
+            print(f"Loading model {args.model_dir} via DDP (world_size={world_size})...")
+        model, tokenizer = load_model(
+            args.model_dir,
+            lora_rank=args.lora_rank, lora_alpha=args.lora_alpha,
+            attn_impl=args.attn_impl,
+            use_ddp=True, local_rank=local_rank,
+        )
+    elif len(model_gpu_ids) > 1:
         print(f"Loading model {args.model_dir} sharded across GPUs {model_gpu_ids}...")
         model, tokenizer = load_model(
             args.model_dir, model_gpus=model_gpu_ids,
@@ -304,14 +347,24 @@ def main():
 
     # State: best code + best bpb (no PUCT tree)
     if args.resume_step is not None:
-        print(f"\n--- Resuming from step {args.resume_step} ---")
+        if is_rank0:
+            print(f"\n--- Resuming from step {args.resume_step} ---")
         lora_path = os.path.join(args.log_dir, f"lora_step_{args.resume_step:06d}")
         if os.path.exists(lora_path):
             from peft import PeftModel
-            model = PeftModel.from_pretrained(model.base_model.model, lora_path, is_trainable=True)
-            model.input_device = next(model.parameters()).device
+            # In DDP, unwrap to reach the PEFT base_model, rewrap afterwards.
+            peft_model = underlying(model)
+            reloaded = PeftModel.from_pretrained(peft_model.base_model.model, lora_path, is_trainable=True)
+            reloaded.input_device = next(reloaded.parameters()).device
+            if is_distributed:
+                model = torch.nn.parallel.DistributedDataParallel(
+                    reloaded, device_ids=[local_rank], find_unused_parameters=True,
+                )
+                model.input_device = reloaded.input_device
+            else:
+                model = reloaded
             optimizer = torch.optim.AdamW(
-                [p for p in model.parameters() if p.requires_grad],
+                [p for p in underlying(model).parameters() if p.requires_grad],
                 lr=args.lr, betas=(0.9, 0.95), eps=1e-8,
             )
         best_code_path = os.path.join(args.log_dir, "best_train.py")
@@ -374,6 +427,7 @@ def main():
                 temperature=args.temperature, max_new_tokens=args.max_new_tokens,
                 history_context=history_ctx,
                 think_budget=think_budget,
+                split_pipeline=args.split_pipeline,
             )
 
             ep = Episode(
@@ -447,6 +501,7 @@ def main():
                 error_context=reflection_ctx,
                 history_context=history_ctx,
                 think_budget=think_budget,
+                split_pipeline=args.split_pipeline,
             )
 
             ep = episodes[g]
@@ -556,6 +611,8 @@ def main():
             max_grad_norm=args.max_grad_norm,
             dr_grpo=args.dr_grpo,
             adv_type=args.adv_type,
+            loss_agg_mode=args.loss_agg_mode,
+            clip_ratio_high=args.clip_ratio_high,
         )
         n_distilled = sum(1 for ep in episodes if ep.train_distill)
         print(f"\n  ERL update: grpo={metrics['avg_grpo_loss']:.4f} "
@@ -565,8 +622,9 @@ def main():
               f"ref_tok={metrics['num_reflect_tokens']} "
               f"dist_tok={metrics['num_distill_tokens']})")
 
-        # ── Checkpoint ──
-        model.save_pretrained(os.path.join(args.log_dir, f"lora_step_{step:06d}"))
+        # ── Checkpoint (rank 0 only) ──
+        if is_rank0:
+            underlying(model).save_pretrained(os.path.join(args.log_dir, f"lora_step_{step:06d}"))
         step_time = time.time() - step_start
 
         step_info = {

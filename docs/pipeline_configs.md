@@ -76,6 +76,8 @@ Two supported hardware targets:
 | Reward | `1/val_bpb` (success) or `0.0` (crash / edit_failed) |
 | History summary | ERL only: 1 LLM call/step summarizes `results.tsv` dead ends + worked directions into proposal prompts |
 | ERL attempt advantages | `--adv-type grpo` (default) or `--adv-type ttt` (entropic LOO) |
+| ERL loss aggregation | `--loss-agg-mode {seq-sum-token-mean (default), seq-mean-token-mean, seq-mean-token-sum (paper), seq-mean-token-sum-norm (Dr. GRPO)}`. Default preserves pre-2026-04-19 behavior (sum across rollouts, mean within). Paper value matches `microsoft/experiential_rl`. |
+| ERL ratio clipping | `--clip-ratio-high <eps>` enables PPO-style asymmetric clip at `1+eps` (e.g. `0.28` for DAPO). Default disabled. |
 | B200 modules | gcc/14.2.0, cuda/12.8.1, conda |
 | Pro 6000 env setup | uv venv + pinned pip install (no modules) |
 
@@ -172,6 +174,14 @@ Frozen pipeline takes 2 GPUs (SGLang + main.py). ERL runs on 8 auto-detected GPU
 | Submit | `bash run_pro6000.sh` | `bash erl_pipeline/run_erl_pro6000.sh` |
 
 **GPU auto-detection:** Both scripts pick the N least-used GPUs via `nvidia-smi --query-gpu=memory.used`. The frozen pipeline picks 2, ERL picks 8 (first 4 for model, next 4 for eval). On an 8-GPU box run one or the other, not both simultaneously. Since this cluster has no SLURM, `#SBATCH` directives are inert comments and scripts are launched directly with `bash` (typically via `nohup ... &` for persistence across SSH disconnects).
+
+**Paper-parity variant (`run_erl_pro6000_paper.sh`, 2026-04-19):** same infra as `run_erl_pro6000.sh`, only training-loop hyperparameters differ to match `microsoft/experiential_rl/train_scripts/train_erl_sokoban.sh`:
+- `--lr 1e-6` (vs default 4e-5)
+- `--kl-coef 0.001` (vs default 0.1)
+- `--loss-agg-mode seq-mean-token-sum` (vs default `seq-sum-token-mean`)
+- `--clip-ratio-high 0.28` (vs default off)
+- `--max-new-tokens 10240` (vs default 16000)
+Writes to separate `./erl_log_pro6000_paper` so it doesn't collide with the default run's logs.
 
 ### Memory-limited test (3 GPUs, quick validation)
 

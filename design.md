@@ -64,6 +64,7 @@ llm_scaffold/
 │   ├── run_erl_4gpu_memlimit.sh — SLURM 3-GPU B200 (2 workers/GPU, 88GB cap, batch=4)
 │   ├── run_erl_4gpu_ttt.sh      — SLURM 3-GPU B200 variant using TTT entropic advantages
 │   ├── run_erl_pro6000.sh       — SLURM 8-GPU Pro 6000 Blackwell (uv venv, no memlimit)
+│   ├── run_erl_pro6000_paper.sh — Pro 6000 with ERL-paper-parity hyperparams (loss_agg=seq-mean-token-sum, clip_ratio_high=0.28, lr=1e-6, kl=0.001)
 │   ├── clean.sh                 — cleanup script (parallel unlink + rm -rf fallback)
 │   ├── mock_erl_test.py         — logic tests (no GPU)
 │   ├── smoke_test_erl.py        — GPU smoke test (1 GPU)

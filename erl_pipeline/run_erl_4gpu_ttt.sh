@@ -83,6 +83,7 @@ python erl_main.py \
     --think-budget 6000 \
     --attn-impl sdpa \
     --adv-type ttt \
-    --log-dir ./erl_log_ttt
+    --log-dir ./erl_log_ttt \
+    --resume-step 16
 
 echo "Python exited at $(date)."

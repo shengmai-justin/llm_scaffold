@@ -105,3 +105,44 @@ Pulled the full public `@autoresearch-at-home/` namespace via Ensue's public JSO
 - **Our HP proposals tune the wrong knobs.** Network winners: `final_lr` (22.0 %), `embed_lr` (25.0 %), `grad_accum` (25.0 %), `warmdown` (19.2 %). Our ERL over-indexes on `warmup`, `weight_decay`, generic `LR`.
 
 The raw data dump lives at `/tmp/ens_all_results.json` (~2 MB, schema documented in the analysis file). Can be pulled into our history summarizer as an oracle corpus if we want to seed the model with swarm-derived structural exemplars.
+
+## Deviations from original ERL paper (arXiv 2602.13949) — 2026-04-19
+
+Audit of our pipeline vs Microsoft ERL reference.
+
+### Shared reflection (intentional divergence)
+
+Paper generates **per-rollout reflection** gated by `r(1) < τ=1` — one reflection per failed attempt1, matching attempt2. We generate **one shared reflection per batch** from aggregated attempt1 feedback, used by all K attempt2 prompts.
+
+Rationale: paper's tasks (Sokoban, FrozenLake, HotpotQA) batch *different* problem instances — each rollout attacks its own puzzle, so a shared reflection would average across unrelated failures. Our task batches K attempts at the *same* train.py at the *same* step, so failures are correlated (policy drift → all 4 propose similar weight_decay variants). Shared meta-reflection surfaces cross-rollout patterns ("all 4 tried HP tuning — try structural change") that per-rollout reflection cannot. Keeping shared; K× cheaper and better signal for our problem shape.
+
+### Other deviations
+
+Revised after reading `microsoft/experiential_rl/train_scripts/train_erl_sokoban.sh`:
+
+- **Loss aggregation:** paper uses `seq-mean-token-sum` (sum tokens within rollout, mean across rollouts). Ours is `seq-sum-token-mean` (opposite on both axes).
+- **KL coefficient:** paper 0.001, ours 0.1 (100×).
+- **Learning rate:** paper 1e-6, ours 4e-5 (40×). Our LR-to-aggregation ratio roughly offsets the paper's, so effective step size is similar.
+- **Clip ratio:** paper uses DAPO-style asymmetric upper 0.28; ours had no clipping.
+- **Max tokens:** paper 10240, ours 16000 (long-CoT task justifies ours; paper-parity script caps at 10240).
+- **Distributed strategy:** paper uses FSDP + CPU offload (full-param training). Ours uses `device_map="auto"` pipeline parallel. Not comparable because our LoRA economics favor DDP, not FSDP.
+- **Reflection always-on vs gated:** paper skips reflection when attempt1 succeeded (`r(1) ≥ τ`). We always generate. Wastes compute when attempt1 already kept; noise in the reflection loss when there's nothing to reflect on.
+- **Distillation gate:** paper `I(r(2) > 0)` binary; ours `val_bpb < step_best_bpb` (domain-appropriate for continuous reward).
+
+### Paper-parity flags landed (2026-04-19)
+
+Additive flags in `erl_main.py` + dispatch in `erl_trainer.py`:
+- `--loss-agg-mode {seq-sum-token-mean (default), seq-mean-token-mean, seq-mean-token-sum, seq-mean-token-sum-norm}`
+- `--clip-ratio-high <eps>` — PPO-style asymmetric clip (min-trick), disabled by default
+
+New launch script `run_erl_pro6000_paper.sh` opts into paper values (`lr=1e-6`, `kl_coef=0.001`, `loss_agg_mode=seq-mean-token-sum`, `clip_ratio_high=0.28`, `max_new_tokens=10240`). All existing scripts unchanged — defaults preserve prior behavior bit-for-bit.
+
+### DDP infrastructure landed, rollout restructuring deferred (2026-04-19)
+
+In `rl_model.py`: `use_ddp=True` branch wraps with `DistributedDataParallel`; `underlying()` helper strips DDP for `.generate()` / `.save_pretrained()` / `.disable_adapter_layers()` call-sites. Non-reentrant gradient checkpointing enabled.
+
+In `erl_main.py`: `torch.distributed.init_process_group` runs when launched via torchrun (triggered by `LOCAL_RANK` env); rank-0 guards on Ray init and checkpoint save; DDP-aware resume path.
+
+**Not done (deferred):** phase-1/3 rollout loops still monolithic (all-rollouts-per-rank). Needs per-rank slice + reward all_gather + reflection broadcast + Ray coordination + barriers. Scoped at ~300 LOC with many failure modes that need cluster testing.
+
+Next direction instead: `docs/SPLIT_PIPELINE.md` — decompose proposal into ideator (RL-trained) + implementer (frozen), smaller action space, cleaner credit assignment. Much simpler than DDP and orthogonal to other changes.
