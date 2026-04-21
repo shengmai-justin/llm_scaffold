@@ -77,6 +77,7 @@ python erl_main.py \
     --think-budget 6000 \
     --attn-impl sdpa \
     --split-pipeline \
+    --resume-step 13 \
     --log-dir ./erl_log_split
 
 echo "Python exited at $(date)."
