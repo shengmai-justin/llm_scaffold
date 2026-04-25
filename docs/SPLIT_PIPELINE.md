@@ -1,5 +1,7 @@
 # Split Pipeline: Ideator + Implementer
 
+**Status:** implemented 2026-04-20. Best result so far: TTT+split on B200, val_bpb 0.9858 → 0.9690 in 22 steps (15 keeps / 176 rollouts, 8.5% keep rate). See `results/2026-04-20_erl_ttt_split.md`.
+
 ## Context
 
 Current ERL pipeline uses a single LLM call per rollout that does both ideation ("what to change") and implementation ("produce JSON with search/replace edits"). RL reward + gradient flows through the entire combined generation, so:
@@ -117,10 +119,34 @@ A/B vs monolithic:
 
 Don't pass `--split-pipeline` → defaults to existing monolithic generation. Zero change to today's runs.
 
-## Open decisions (for implementation session)
+## Open decisions — resolved 2026-04-19
 
-1. **Implementer temperature.** 0.0 (deterministic) vs 0.3 (slight variation for retry robustness). Start 0.0.
-2. **Implementer think budget.** 0 (no thinking — pure translation) vs 512 (light reasoning). Start 0.
-3. **Retry policy on stage B failure.** 1 retry at temperature 0.7 vs immediate zero reward. Start 1 retry.
-4. **Reward on stage-B-only failure.** Zero (our default) vs a small negative penalty (−0.1) to discourage stage A from producing unimplementable ideas.
-5. **Ideator output format.** Free text vs structured (`CATEGORY: ... CHANGE: ... RATIONALE: ...`). Start free text for minimum intervention.
+1. **Implementer temperature:** 0.7 throughout (all 3 attempts). Kept at 0.7 rather than 0.0 so retries get meaningful sampling variation.
+2. **Implementer think budget:** 0 (`enable_thinking=False` via Qwen3 chat template) — implementer outputs JSON directly, no `<think>` tokens.
+3. **Retry policy on stage B failure:** 3 total attempts (initial + 2 retries), all at temp 0.7. Zero reward on final failure.
+4. **Reward on stage-B-only failure:** zero (no negative penalty). Empty `edits` → rollout.status = `edit_failed`, stage-A tensors preserved so rollout still contributes to GRPO advantage grouping.
+5. **Ideator output format:** free natural-language text. Prompt is `rl_pipeline/prompt_ideator.md`.
+
+**Other locked defaults:** ideator `max_new_tokens=8192` (hardcoded, caller's flag ignored), implementer `max_new_tokens=4096`, stage A retries = 0 (single-shot per rollout — retrying stage A would break the one-action-per-rollout RL invariant).
+
+## Empirical results (first full runs, 2026-04-20)
+
+| Config | Steps | Keeps | `edit_failed` | `crash` | Best val_bpb | Δ from baseline |
+|---|---|---|---|---|---|---|
+| GRPO + split (B200) | 14 | 0 | 3.6% | 8.9% | 0.988775 (unchanged) | 0 — ran out of wallclock before finding any keep |
+| **TTT + split (B200)** | **22** | **15 (8.5%)** | **1.7%** | 44.3% | **0.969023** | **−0.0168** — best result on this scaffold to date |
+
+TTT+split is the reference config going forward. GRPO+split produced zero keeps in 14 steps (baseline already strong); TTT+split's entropic advantages push harder toward structural changes, and the split implementer drops `edit_failed` to a record low 1.7%. See `results/2026-04-20_erl_ttt_split.md` for the full coherent-research-arc trace (batch → LR sweep → VE_GATE binary search → schedule tuning).
+
+## Launch scripts
+
+Four B200/Pro 6000 variants, all namespaced to avoid collisions with monolithic runs:
+
+| Script | Hardware | Adv | Repo | Log dir |
+|---|---|---|---|---|
+| `run_erl_4gpu_split.sh` | B200 | grpo | `autoresearch_erl_split` | `erl_log_split` |
+| `run_erl_4gpu_ttt_split.sh` | B200 | ttt | `autoresearch_erl_ttt_split` | `erl_log_ttt_split` |
+| `run_erl_pro6000_split.sh` | Pro 6000 | grpo | `autoresearch_erl_split` | `erl_log_pro6000_split` |
+| `run_erl_pro6000_ttt_split.sh` | Pro 6000 | ttt | `autoresearch_erl_pro6000_ttt_split` | `erl_log_pro6000_ttt_split` |
+
+Matching clean scripts: `clean_split.sh`, `clean_ttt_split.sh`, `clean_pro6000_split.sh`, `clean_pro6000_ttt_split.sh`. Smoke test: `smoke_erl_split.sh` runs `mock_split_test.py` + 2-step cluster run. Pro 6000 launchers now also auto-symlink `$ERL_REPO/.venv` → `.venv_pro6000` so `uv run train.py` finds the working venv.

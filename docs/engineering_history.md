@@ -146,3 +146,65 @@ In `erl_main.py`: `torch.distributed.init_process_group` runs when launched via 
 **Not done (deferred):** phase-1/3 rollout loops still monolithic (all-rollouts-per-rank). Needs per-rank slice + reward all_gather + reflection broadcast + Ray coordination + barriers. Scoped at ~300 LOC with many failure modes that need cluster testing.
 
 Next direction instead: `docs/SPLIT_PIPELINE.md` — decompose proposal into ideator (RL-trained) + implementer (frozen), smaller action space, cleaner credit assignment. Much simpler than DDP and orthogonal to other changes.
+
+## Split pipeline landed, TTT+split becomes reference config — 2026-04-20
+
+Split-pipeline implementation shipped. Three new functions in `rl_pipeline/rl_planner.py` (`propose_idea`, `implement_idea`, `propose_experiment_split`), two prompt files (`prompt_ideator.md`, `prompt_implementer.md`), `--split-pipeline` flag in `erl_main.py`, four new launch scripts (+ matching clean scripts) fully namespaced so split runs don't collide with monolithic runs.
+
+**Implementation decisions (resolved during the session):**
+- Ideator: 8192 max_new_tokens hardcoded (ignores caller's flag), `--think-budget 6000` retained, single shot per rollout (no stage-A retry — retrying would break the one-action-per-rollout RL invariant).
+- Implementer: temp 0.7, max 4096 tokens, 3 attempts total (initial + 2 retries at same temp), `enable_thinking=False` via Qwen3 chat template.
+- Zero reward on stage-B failure (no −0.1 penalty).
+- Free-text ideator output.
+
+**Pro 6000 launch bug + fix.** First non-smoke launch failed at baseline with `uv run train.py` complaining about a broken `.venv` inside `autoresearch_erl_split/`. Root cause: the first `uv run` inside that dir auto-created a `./.venv` with the default Python (no torch), and uv prefers project-local `.venv` over `VIRTUAL_ENV`. Fix landed in `run_erl_pro6000_split.sh` (and its ttt variant): pre-clone `$ERL_REPO` from shell, then `ln -sfn $VENV_DIR $ERL_REPO/.venv` before invoking Python. Self-healing on every launch. The monolithic `run_erl_pro6000.sh` was left unchanged — it works on the cluster because `autoresearch/.venv` is already a working uv-managed venv that `shutil.copytree` duplicates.
+
+**First full runs — split pipeline on B200 (2026-04-20):**
+
+| Config | Steps | Keeps | `edit_failed` | `crash` | Baseline → best | Δ |
+|---|---|---|---|---|---|---|
+| GRPO + split | 14 | 0 | 3.6% | 8.9% | 0.988775 → 0.988775 | 0 |
+| **TTT + split** | **22** | **15 (8.5%)** | **1.7%** | 44.3% | **0.985769 → 0.969023** | **−0.0168** |
+
+TTT+split is the best configuration observed on this scaffold. 10/15 keeps from attempt2 — first direct evidence the reflection → refinement channel produces improvements (0/K in all prior runs). Distillation fired on 9/22 steps. Coherent research arc visible in `results/2026-04-20_erl_ttt_split.md`: depth → batch size → EMBEDDING_LR → SCALAR_LR / WEIGHT_DECAY → VE_GATE_CHANNELS binary search (32→16→8→4) → schedule tuning.
+
+CoT drift re-emerging after step 16 (`num_grpo_tokens` 13K → 42K by step 17, 46K by step 21). Same warning signal that preceded the 2026-04-19 monolithic TTT OOM. Split's 8K ideator cap bounds stage A, but stage A can still drift past 8K via repeated think tokens if the budget processor misses. Worth watching on resumes.
+
+GRPO+split's 0 keeps isn't a pipeline failure — the baseline (0.9888) is the tightest on this scaffold to date, median rollout val_bpb was 1.036, closest miss was 0.988979 (0.02% above baseline). Likely converts to keeps with more wallclock; the 10 h slot only got 14 steps.
+
+## Forge XL-tier leaderboard analysis — 2026-04-23
+
+Pulled Ensue public MCP (`@autoresearch-at-home/best/tier/xl/train_py`) and compared forge's global-best train.py (val_bpb=0.926381, H200 XL tier, WSD 30/70 sqrt + FINAL_LR_FRAC 0.02) against our 2026-04-20 TTT+split best (val_bpb=0.969023). Gap = −0.043 BPB.
+
+Disaggregated by category:
+
+| Gap source | Est. contribution | Notes |
+|---|---|---|
+| Compiler/kernel pipeline | ~−0.013 (remaining after our baseline FA4) | Inductor flags (`coordinate_descent_tuning`, `epilogue_fusion`, `aggressive_fusion`, `shape_padding`, `max_autotune_pointwise`), `torch.library.custom_op` wrapping FA4 fwd + bwd so compile doesn't graph-break, `max-autotune` mode + CUDA graphs. We have raw FA4 kernel (`from flash_attn.cute import flash_attn_func`) and basic `torch.compile(model)`, capturing ~−0.010 of the full Day-4 stack's −0.021. Remaining is pure engineering port, no RL discovery needed. |
+| Architecture | ~−0.012 | All-layer VE (forge: `has_ve=True` always, we: alternating), `ve_gate_channels=64` (we went wrong way: 32→4), `ve_gate` multiplier 4× (we: 2×), QK scale ×1.15 (we: none), skip-2 residual with learnable `skip2_lambdas` (we: absent), softcap 13 (we: 15), short_window = `long_window//16` (we: `//2`), rotary base 50000 (we: 10000), DEPTH 12 (we: 10). |
+| HP refinements | ~−0.008 | `TOTAL_BATCH_SIZE` 2^17 (we: 2^18, forge halved again for more steps), `EMBEDDING_LR` 1.2 (we: 0.4 — opposite direction), `WARMDOWN_RATIO` 0.7 / WSD 30/70 sqrt (we: 0.5), `FINAL_LR_FRAC` 0.02 (we: 0.01), `ADAM_BETAS` (0.8, 0.99) (we: (0.8, 0.95)). |
+| Init + optimizer internals | ~−0.002 | `wte` std 0.8 (we: 1.0), matrix init √2 (we: √3), `resid_lambdas` init 0.9 (we: 1.0), Muon `ns_steps=7` (we: 5), Muon `beta2=0.90` (we: 0.95), decoupled `value_embeds` LR at 0.3, AdamW weight_decay 0.01 on lm_head. |
+
+**Forge's VRAM budget:** 48.8 GB measured on H200 (out of 178 GB). Comfortably fits our 88 GB B200 per-worker cap with ~40 GB headroom. DEPTH 12 + all-layer VE pays for itself in memory by halving `DEVICE_BATCH_SIZE` to 64 and shrinking short-window attention (`//16` vs `//2`). The package is VRAM-neutral vs our current setup.
+
+**Qwen3.5-9B cannot write the FA4 `custom_op` wrapper from scratch.** Git history on `github.com/mikeapedia/autoresearch-at-home` branch `autoresearch/mar15` shows the wrapper took **7 commits** to land (Claude + human-in-loop): started with FlexAttention (failed), fell back to `torch._dynamo.allow_in_graph` (insufficient fusion), escalated to full `@torch.library.custom_op`, hit a saved-LSE bug, return-type bug, then extended to wrap backward. Even Claude (200B-class) iterated through compile errors to land this. Our Qwen3.5-9B has no runtime feedback channel in ERL and would almost certainly crash-loop on it. Recommendation: **port those ~40 lines manually** rather than wait for RL to re-derive a known recipe.
+
+## Probes directory — 2026-04-23
+
+Added `probes/` — diagnostic tooling that tests whether Qwen3.5-9B knows techniques our ERL has zero coverage on (derived from the Ensue swarm category data). Not part of any pipeline.
+
+- `prompt_knowledge_probe.md` — "implement technique X in this train.py or honestly admit the gap" system prompt (admits-gap is a valid response, not a failure).
+- `knowledge_probes.txt` — 18 techniques grouped by category: Muon internals (Newton-Schulz coefficients + step count), optimizer swaps (Sophia / Lion / MuP), stability (SWA / EMA / stochastic depth / QK-norm / tied Q=K), loss shape (z-loss / label smoothing), architecture (2× MLP stacking), schedule (FINAL_LR_FRAC, sqrt warmdown), compilation (torch.compile max-autotune), training-budget knobs (DEVICE_BATCH_SIZE restructuring, knowledge distillation).
+- `run_probes.py` — iterates probes against an OpenAI-compatible endpoint, saves raw outputs + `summary.json` classifying each as `OK` / `ADMITTED` / `PARTIAL` / `BAD_JSON`. `--retries N` retries BAD_JSON only (not ADMITTED or PARTIAL — those are genuine signals worth preserving). `OK` = valid JSON + all search strings match train.py; `PARTIAL` = valid JSON but some search strings don't match (knows concept, wrong names); `ADMITTED` = empty `edits` list with honest "I don't know" description.
+- `run_probes_pro6000.sh` — one-command launcher mirroring `run_pro6000.sh` serve-then-query pattern (SGLang on port 8000, triton backend, auto-picks 1 free GPU, trap-cleans server on exit).
+
+Does **not** actually execute `train.py` with the proposed edits — measures knowledge + localization only, not correctness. An `OK` classification means edits apply cleanly, not that the resulting train.py runs or converges. Adding `--eval-apply` to route OK outputs through `results.run_experiment` is a ~30 LOC extension if needed.
+
+**Method-coverage baseline (scan of 2,432 ERL rollouts across 8 runs, 2026-04-23):**
+- **Genuine zero-coverage Qwen blind spots vs swarm:** MLP stacking (swarm 10 runs, 20% keep; us 0), Newton-Schulz coefficients (part of swarm's 232 muon-internals runs; us 0 on coefficients specifically — we touch MATRIX_LR, ns_steps, Muon momentum, beta2 etc. but never the polynomial 3-tuple), `training_duration` / num_iterations changes (swarm 63 runs, 20.6% keep; us ~0 real hits).
+- **Day-5 novel techniques we've never tried:** temporal time-mixing (Ember's causal carry on MLP inputs), QK scale tuning, VE gate warmup, sqrt warmdown, multi-seed variance baselining.
+- **Zero-coverage on both sides (swarm backlog):** curriculum learning, quality filtering, domain weighting. Called out in Day-5 blog as "the last major unexplored axis."
+
+## Variance floor awareness — 2026-04-23
+
+Day-5 Ensue blog reported **seed variance ~0.007 BPB on B200** — larger than most single-parameter "improvements" (0.001–0.003). Implication for our TTT+split run: the cumulative Δ=−0.0168 is safely above the floor, but the individual step-by-step keeps (0.973→0.972→0.971) are within noise. The overall research arc is real; the fine-grained "which step was the important one" question is not well-posed under this noise level. If future runs care about per-step attribution, add a multi-seed baseline first (3–5 runs of unchanged baseline) to establish the floor on our exact hardware.

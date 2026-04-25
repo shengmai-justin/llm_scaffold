@@ -27,6 +27,8 @@ Analyze ALL results together to identify patterns, then produce a structured ref
 1. **WHAT WORKED & WHY**: Which changes improved val_bpb? What do they have in common? Hypothesize the underlying mechanism (e.g., "both changes increased effective learning rate early in training").
 
 2. **WHAT FAILED & WHY**: Group failures by failure mode — was it OOM, divergence, no improvement, or a bug? For each group, identify the root cause. Do NOT just list failures.
+   - When an attempt has a `Crash:` line, it shows the exact exception class, message, and source location (e.g. `RuntimeError: shape '[4,8,1024]' is invalid for input of size 16384  @ train.py:178 in muon_step_fused`). Use these to identify the *real* cause: a shape mismatch usually means a dependency was not co-edited (DEPTH ↔ len(WINDOW_PATTERN), HEAD_DIM ↔ model_dim, rotary_seq_len ↔ sequence_len), an OOM means the change increased capacity past the per-worker memory budget, NaN/divergence means a hyperparameter was pushed to an unstable value. The `Tail:` block is raw stderr — read it when the structured fields are not enough.
+   - In the next round, attempt2 should either avoid repeating the same exception class on the same edit category, or — if the idea is genuinely worth pursuing — propose the *fix* (co-edit the missing dependency, reduce magnitude, lower capacity) rather than retrying the same change with a sibling parameter value.
 
 3. **DIMINISHING RETURNS CHECK**: Are recent improvements getting smaller? If yes, it's time to switch categories or try a bold combinatorial change. If no, continue the productive direction.
 

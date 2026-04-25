@@ -20,3 +20,4 @@ class Rollout:
     status: str                  # keep/discard/crash/edit_failed
     reward: float
     description: str
+    crash_signature: dict | None = None   # populated on crash/timeout (see results.extract_crash_signature_from_text)

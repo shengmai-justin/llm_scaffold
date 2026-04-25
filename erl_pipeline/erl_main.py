@@ -131,6 +131,30 @@ def collect_eval(ref, rollout):
     return result
 
 
+def finalize_crash_diagnostics(rollout, eval_result, log_dir, step, attempt_tag, idx):
+    """On crash, extract a structured signature, attach to rollout, persist artifacts.
+
+    Writes <log_dir>/crashes/<id>.log (raw output tail) and appends a record
+    to <log_dir>/crashes.jsonl. id = 'step{step:04d}_a{attempt_tag}_{idx}'.
+    No-op for non-crash rollouts.
+    """
+    if rollout.status != "crash":
+        return
+    output = (eval_result or {}).get("output", "") or ""
+    timed_out = (output == "timeout")
+    sig = results.extract_crash_signature_from_text(output, timed_out=timed_out)
+    rollout.crash_signature = sig
+    rid = f"step{step:04d}_a{attempt_tag}_{idx}"
+    crashes_dir = os.path.join(log_dir, "crashes")
+    os.makedirs(crashes_dir, exist_ok=True)
+    Path(os.path.join(crashes_dir, f"{rid}.log")).write_text(output)
+    with open(os.path.join(log_dir, "crashes.jsonl"), "a") as f:
+        f.write(json.dumps({
+            "id": rid, "step": step, "attempt": attempt_tag, "idx": idx,
+            "description": rollout.description, "signature": sig,
+        }) + "\n")
+
+
 def run_eval_sequential(repo_path, parent_code, edited_code, train_path, rollout):
     """Run train.py sequentially (no Ray). Updates rollout in place, returns result dict."""
     state_mod.write_file(train_path, edited_code)
@@ -410,6 +434,7 @@ def main():
         think_budget = args.think_budget if args.think_budget > 0 else None
         history_ctx = generate_history_summary(
             model, tokenizer, results.RESULTS_FILE,
+            crashes_jsonl_path=os.path.join(args.log_dir, "crashes.jsonl"),
             temperature=0.3,
             think_budget=min(think_budget, 512) if think_budget else None,
         )
@@ -445,6 +470,7 @@ def main():
                 # Serial mode: run eval immediately
                 result = run_eval_sequential(repo_path, best_code, edited_code, train_path, rollout)
                 ep.attempt1_eval = result
+                finalize_crash_diagnostics(rollout, result, args.log_dir, step, attempt_tag=1, idx=g)
                 val_str = f"{rollout.val_bpb:.6f}" if rollout.val_bpb else "---"
                 print(f"  Attempt1 {g+1} result: val_bpb={val_str}  reward={rollout.reward:.4f}")
             else:
@@ -455,6 +481,7 @@ def main():
             ep = episodes[idx]
             result = collect_eval(ref, ep.attempt1_rollout)
             ep.attempt1_eval = result
+            finalize_crash_diagnostics(ep.attempt1_rollout, result, args.log_dir, step, attempt_tag=1, idx=idx)
             val_str = f"{ep.attempt1_rollout.val_bpb:.6f}" if ep.attempt1_rollout.val_bpb else "---"
             print(f"  Attempt1 {idx+1} result: val_bpb={val_str}  reward={ep.attempt1_rollout.reward:.4f}")
 
@@ -469,6 +496,7 @@ def main():
                 "val_bpb": r.val_bpb,
                 "eval_output": ep.attempt1_eval["output"] if ep.attempt1_eval else None,
                 "edit_error": str(ep.attempt1_proposal) if r.status == "edit_failed" and ep.attempt1_proposal else None,
+                "crash_signature": r.crash_signature,
             })
 
         batch_feedback = build_batch_feedback(attempt_summaries, best_bpb)
@@ -517,6 +545,7 @@ def main():
                 # Serial mode
                 result = run_eval_sequential(repo_path, best_code, edited2, train_path, rollout2)
                 ep.attempt2_eval = result
+                finalize_crash_diagnostics(rollout2, result, args.log_dir, step, attempt_tag=2, idx=g)
                 val_str = f"{rollout2.val_bpb:.6f}" if rollout2.val_bpb else "---"
                 print(f"  Attempt2 {g+1} result: val_bpb={val_str}  reward={rollout2.reward:.4f}")
             else:
@@ -527,6 +556,7 @@ def main():
             ep = episodes[idx]
             result = collect_eval(ref, ep.attempt2_rollout)
             ep.attempt2_eval = result
+            finalize_crash_diagnostics(ep.attempt2_rollout, result, args.log_dir, step, attempt_tag=2, idx=idx)
             val_str = f"{ep.attempt2_rollout.val_bpb:.6f}" if ep.attempt2_rollout.val_bpb else "---"
             print(f"  Attempt2 {idx+1} result: val_bpb={val_str}  reward={ep.attempt2_rollout.reward:.4f}")
 

@@ -13,6 +13,7 @@ def build_attempt_feedback(
     best_val_bpb: float,
     eval_output: str | None = None,
     edit_error: str | None = None,
+    crash_signature: dict | None = None,
 ) -> str:
     """Build feedback for a single attempt."""
     lines = [f"Experiment: {description}"]
@@ -23,7 +24,22 @@ def build_attempt_feedback(
             lines.append(f"Error: {edit_error}")
     elif status == "crash":
         lines.append("Result: CRASH — train.py failed to produce val_bpb.")
-        if eval_output:
+        if crash_signature:
+            kind = crash_signature.get("kind") or "unknown"
+            cls = crash_signature.get("exception_class")
+            msg = crash_signature.get("message")
+            loc = crash_signature.get("location")
+            label = cls if cls else kind.upper()
+            line = f"Crash: {label}"
+            if msg:
+                line += f": {msg}"
+            if loc:
+                line += f"  @ {loc}"
+            lines.append(line)
+            tail = crash_signature.get("tail")
+            if tail:
+                lines.append(f"Tail:\n{tail}")
+        elif eval_output:
             lines.append(f"Last output:\n{eval_output.strip()[-300:]}")
     elif status == "timeout":
         lines.append("Result: TIMEOUT — exceeded time budget.")
@@ -78,6 +94,7 @@ def build_batch_feedback(
             best_val_bpb=best_val_bpb,
             eval_output=a.get("eval_output"),
             edit_error=a.get("edit_error"),
+            crash_signature=a.get("crash_signature"),
         )
         sections.append(f"### Attempt {i+1}\n{fb}")
 

@@ -70,6 +70,80 @@ def extract_error_tail(log_text, n_lines=20):
     return "\n".join(lines[-n_lines:])
 
 
+_TRACEBACK_RE = re.compile(r"Traceback \(most recent call last\):", re.MULTILINE)
+_EXC_LINE_RE = re.compile(r"^([A-Za-z_][\w\.]*(?:Error|Exception|Warning|Interrupt)): ?(.*)$", re.MULTILINE)
+_FRAME_RE = re.compile(r'File "([^"]+)", line (\d+), in (\S+)')
+_OOM_RE = re.compile(r"(CUDA out of memory|torch\.cuda\.OutOfMemoryError|OutOfMemoryError)", re.IGNORECASE)
+_SEGFAULT_RE = re.compile(r"(Segmentation fault|SIGSEGV|core dumped)", re.IGNORECASE)
+
+
+def extract_crash_signature_from_text(text, timed_out=False, max_msg_chars=240, tail_lines=12):
+    """Parse a stdout+stderr string for a structured crash signature.
+
+    Returns dict with keys {kind, exception_class, message, location, tail}.
+    Non-crash text still yields a signature with kind='unknown' — caller
+    filters by status.
+    """
+    tail = extract_error_tail(text, n_lines=tail_lines)
+
+    if timed_out:
+        return {"kind": "timeout", "exception_class": None,
+                "message": "train.py exceeded timeout", "location": None, "tail": tail}
+
+    # Python traceback (preferred — most informative)
+    tb_matches = list(_TRACEBACK_RE.finditer(text))
+    if tb_matches:
+        tb_start = tb_matches[-1].start()
+        tb_block = text[tb_start:]
+        exc_match = None
+        for m in _EXC_LINE_RE.finditer(tb_block):
+            exc_match = m
+        train_frames = [m for m in _FRAME_RE.finditer(tb_block) if "train.py" in m.group(1)]
+        location = None
+        if train_frames:
+            last = train_frames[-1]
+            location = f"train.py:{last.group(2)} in {last.group(3)}"
+        elif exc_match:
+            any_frames = list(_FRAME_RE.finditer(tb_block))
+            if any_frames:
+                last = any_frames[-1]
+                fn = os.path.basename(last.group(1))
+                location = f"{fn}:{last.group(2)} in {last.group(3)}"
+        if exc_match:
+            return {
+                "kind": "exception",
+                "exception_class": exc_match.group(1),
+                "message": exc_match.group(2).strip()[:max_msg_chars],
+                "location": location,
+                "tail": tail,
+            }
+
+    if _OOM_RE.search(text):
+        m = _OOM_RE.search(text)
+        return {"kind": "oom", "exception_class": "CUDAOutOfMemoryError",
+                "message": m.group(0)[:max_msg_chars], "location": None, "tail": tail}
+
+    if _SEGFAULT_RE.search(text):
+        m = _SEGFAULT_RE.search(text)
+        return {"kind": "segfault", "exception_class": None,
+                "message": m.group(0)[:max_msg_chars], "location": None, "tail": tail}
+
+    return {"kind": "unknown", "exception_class": None,
+            "message": None, "location": None, "tail": tail}
+
+
+def retain_crash_log(run_log_path, log_dir, commit):
+    """Copy run.log to <log_dir>/crashes/<commit>.log so it survives the next rollout."""
+    if not os.path.exists(run_log_path):
+        return None
+    crashes_dir = os.path.join(log_dir, "crashes")
+    os.makedirs(crashes_dir, exist_ok=True)
+    dest = os.path.join(crashes_dir, f"{commit}.log")
+    import shutil
+    shutil.copy(run_log_path, dest)
+    return dest
+
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------

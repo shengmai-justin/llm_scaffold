@@ -183,6 +183,25 @@ Frozen pipeline takes 2 GPUs (SGLang + main.py). ERL runs on 8 auto-detected GPU
 - `--max-new-tokens 10240` (vs default 16000)
 Writes to separate `./erl_log_pro6000_paper` so it doesn't collide with the default run's logs.
 
+### Split-pipeline variants (2026-04-20)
+
+Decompose proposal into ideator (RL-trained, natural language) + implementer (frozen, JSON). Enabled with `--split-pipeline`. See `docs/SPLIT_PIPELINE.md`.
+
+Four variants, each pairing an advantage type with a cluster:
+
+| Script | Cluster | Adv | Repo | Log dir |
+|---|---|---|---|---|
+| `run_erl_4gpu_split.sh` | B200 | grpo | `autoresearch_erl_split` | `erl_log_split` |
+| `run_erl_4gpu_ttt_split.sh` | B200 | ttt | `autoresearch_erl_ttt_split` | `erl_log_ttt_split` |
+| `run_erl_pro6000_split.sh` | Pro 6000 | grpo | `autoresearch_erl_split` | `erl_log_pro6000_split` |
+| `run_erl_pro6000_ttt_split.sh` | Pro 6000 | ttt | `autoresearch_erl_pro6000_ttt_split` | `erl_log_pro6000_ttt_split` |
+
+Config is otherwise identical to the corresponding monolithic script (same batch size, KL, LR, LoRA, `--think-budget 6000`, `--max-new-tokens 16000` for the monolithic path — ignored by split which hardcodes ideator=8192, implementer=4096). Pro 6000 scripts additionally symlink `$ERL_REPO/.venv` → `.venv_pro6000` on launch to prevent `uv run train.py` from auto-creating a broken local venv inside the ERL repo. Time limit 10–12 h across variants; run from step 0 by default (pass `--resume-step N` to continue).
+
+Matching clean scripts follow the same naming (`clean_split.sh`, `clean_ttt_split.sh`, `clean_pro6000_split.sh`, `clean_pro6000_ttt_split.sh`). None wipes Ray tmp inside the launch script itself — resume-safe by design. For a full fresh start, run the clean script before launch.
+
+`smoke_erl_split.sh` is a 2-step smoke harness (batch 2, 1 GPU) that invokes the clean script, runs the torch-free `mock_split_test.py`, then launches `run_erl_pro6000_split.sh` with `NUM_STEPS=2 BATCH_SIZE=2` overrides. Expected finish: ~35 min.
+
 ### Memory-limited test (3 GPUs, quick validation)
 
 | | RL (test) |

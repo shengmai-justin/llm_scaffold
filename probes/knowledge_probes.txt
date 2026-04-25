@@ -1,0 +1,36 @@
+# One technique per line. Blank lines and comments (#) are skipped.
+# Derived from categories with 0 or <1% coverage across 2432 ERL rollouts (see results/2026-04-16_ensue_swarm_analysis.md).
+
+# --- Muon internals (our 0-coverage blind spot) ---
+Tune Newton-Schulz coefficients in the Muon optimizer (the 3-tuple polynomial)
+Change Newton-Schulz step count in the Muon optimizer
+
+# --- Optimizer swaps (our 2-coverage blind spot) ---
+Swap Muon for the Sophia optimizer
+Swap Muon for the Lion optimizer
+Apply MuP (maximal update parameterization) width scaling to the learning rates
+
+# --- Stability / regularization ---
+Stochastic weight averaging (SWA) at end of training
+Exponential moving average (EMA) of model weights for evaluation
+Stochastic depth / LayerDrop on transformer blocks
+Tied Q and K projections in attention
+QK-normalization (RMSNorm on Q and K before attention dot product)
+
+# --- Loss shape ---
+Add z-loss as an auxiliary regularizer on logits
+Add label smoothing with scale appropriate for language modeling
+
+# --- Architecture / MLP ---
+Double the MLP block (2x stacked MLPs per transformer layer)
+
+# --- Schedule (high-swarm-keep but under-explored) ---
+Reduce FINAL_LR_FRAC from 0.0 to 0.02 (WSD-style positive end LR)
+Replace cosine warmdown with sqrt warmdown
+
+# --- Compilation / kernels ---
+Set torch.compile mode to max-autotune on the model forward
+
+# --- Training-budget knobs ---
+Restructure gradient accumulation by changing DEVICE_BATCH_SIZE
+Knowledge distillation from a larger frozen teacher checkpoint

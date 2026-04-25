@@ -15,8 +15,10 @@ new proposal directions are absorbed naturally without code changes.
 from __future__ import annotations
 
 import csv
+import json
 import os
 import sys
+from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "rl_pipeline"))
@@ -28,6 +30,7 @@ from rl_model import generate_with_logprobs
 # context window even after a multi-day run.
 MAX_ROWS_IN_CONTEXT = 300
 MIN_ROWS_TO_SUMMARIZE = 20
+MAX_CRASH_RECORDS = 200
 
 
 HISTORY_SYSTEM = """You are a research assistant summarizing experiment history into a compact reference table. The proposer model keeps repeating the same dead-end ideas, and your job is to surface that pattern so the next proposal avoids it.
@@ -57,7 +60,8 @@ Propose a structural or architectural change NOT in the dead-end list. If you mu
 - At most 6 rows in the dead-end table (most-attempted-with-zero-keeps first).
 - At most 5 bullets in the worked-directions section (largest improvements first).
 - Counts must match the raw log exactly. Do NOT estimate.
-- No prose, only the structured output above."""
+- No prose, only the structured output above.
+- If the user message includes a "## Recent crash patterns" section, use those exception-class counts to inform the dead-end table: a crash with the same exception class repeating across an edit category (e.g. RuntimeError on activation swaps, OutOfMemoryError on DEPTH increases) is strong evidence the category is dead on this hardware budget — flag it in the table with the exception class noted in the Outcome column."""
 
 
 def _read_results_tsv(path: str) -> list[dict]:
@@ -78,10 +82,49 @@ def _format_rows(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _read_crashes_jsonl(path: str, limit: int = MAX_CRASH_RECORDS) -> list[dict]:
+    if not path or not os.path.exists(path):
+        return []
+    rows: list[dict] = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return rows[-limit:]
+
+
+def _format_crash_patterns(crash_rows: list[dict]) -> str:
+    """Aggregate (exception_class, kind) into a compact table for the prompt."""
+    if not crash_rows:
+        return ""
+    bucket = Counter()
+    samples: dict[tuple, str] = {}
+    for r in crash_rows:
+        sig = r.get("signature") or {}
+        cls = sig.get("exception_class") or sig.get("kind") or "unknown"
+        loc = sig.get("location") or "—"
+        msg = (sig.get("message") or "").strip()
+        key = (cls, loc)
+        bucket[key] += 1
+        if key not in samples and msg:
+            samples[key] = msg[:140]
+    lines = ["| Exception | Location | Count | Sample message |", "|---|---|---:|---|"]
+    for (cls, loc), n in bucket.most_common(10):
+        sample = samples.get((cls, loc), "")
+        lines.append(f"| {cls} | {loc} | {n} | {sample} |")
+    return "\n".join(lines)
+
+
 def generate_history_summary(
     model,
     tokenizer,
     results_tsv_path: str,
+    crashes_jsonl_path: str | None = None,
     temperature: float = 0.3,
     max_new_tokens: int = 1024,
     think_budget: int | None = 512,
@@ -102,10 +145,19 @@ def generate_history_summary(
     if len(rows) > MAX_ROWS_IN_CONTEXT:
         rows = rows[-MAX_ROWS_IN_CONTEXT:]
 
+    crash_rows = _read_crashes_jsonl(crashes_jsonl_path) if crashes_jsonl_path else []
+    crash_patterns = _format_crash_patterns(crash_rows)
+    crash_section = (
+        f"\n## Recent crash patterns (aggregated from structured tracebacks)\n"
+        f"{crash_patterns}\n"
+        if crash_patterns else ""
+    )
+
     user_msg = (
         f"Total experiments in this view: {len(rows)} "
         f"(showing the most recent up to {MAX_ROWS_IN_CONTEXT}).\n\n"
-        f"Raw results log:\n{_format_rows(rows)}\n\n"
+        f"Raw results log:\n{_format_rows(rows)}\n"
+        f"{crash_section}\n"
         f"Produce the summary table now."
     )
 
