@@ -79,7 +79,6 @@ python erl_main.py \
     --attn-impl sdpa \
     --adv-type ttt \
     --split-pipeline \
-    --resume-step 21 \
     --log-dir ./erl_log_ttt_split
 
 echo "Python exited at $(date)."
